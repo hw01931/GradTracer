@@ -166,7 +166,7 @@ class SaliencyAnalyzer:
         results.sort(key=lambda x: -x[1])
         return results
 
-    def report(self) -> str:
+    def report(self) -> None:
         """Generate a human-readable saliency report."""
         lines = ["─" * 50, "🔬 Dynamic Saliency Report", "─" * 50]
 
@@ -179,7 +179,6 @@ class SaliencyAnalyzer:
 
         report = "\n".join(lines)
         print(report)
-        return report
 
     def to_agent_xml(self) -> str:
         """Export saliency analysis as XML for AI agents."""

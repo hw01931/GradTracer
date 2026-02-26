@@ -281,9 +281,10 @@ class SklearnTracker:
     # ------------------------------------------------------------------
     # Analysis & reporting (delegates to shared boosting infrastructure)
     # ------------------------------------------------------------------
-    def report(self) -> str:
+    def report(self) -> None:
         from flowgrad.diagnostics import generate_boosting_report
-        return generate_boosting_report(self.store)
+        rep = generate_boosting_report(self.store)
+        print(rep)
 
     @property
     def plot(self):

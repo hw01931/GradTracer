@@ -142,7 +142,7 @@ class QuantizationAdvisor:
             "estimated_reduction_pct": round(reduction, 1),
         }
 
-    def report(self) -> str:
+    def report(self) -> None:
         """Generate a human-readable quantization recommendation report."""
         profile = self.sensitivity_profile()
         reduction = self.estimated_size_reduction()
@@ -167,7 +167,6 @@ class QuantizationAdvisor:
 
         report = "\n".join(lines)
         print(report)
-        return report
 
     def to_agent_xml(self) -> str:
         """Export quantization advice as XML for AI agents."""

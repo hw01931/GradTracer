@@ -171,7 +171,7 @@ class DistillationTracker:
 
         return {name: round(float(w), 4) for name, w in zip(names, weights)}
 
-    def report(self) -> str:
+    def report(self) -> None:
         """Generate a human-readable distillation diagnostics report."""
         gaps = self.flow_gap()
         snr = self.snr_comparison()
@@ -210,7 +210,6 @@ class DistillationTracker:
 
         report = "\n".join(lines)
         print(report)
-        return report
 
     def to_agent_xml(self) -> str:
         """Export distillation analysis as XML for AI agents."""

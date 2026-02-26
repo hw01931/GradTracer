@@ -213,10 +213,11 @@ class BoostingTracker:
     # ------------------------------------------------------------------
     # Analysis & reporting
     # ------------------------------------------------------------------
-    def report(self) -> str:
-        """Generate a text diagnostic report."""
+    def report(self) -> None:
+        """Generate and print a text diagnostic report."""
         from flowgrad.diagnostics import generate_boosting_report
-        return generate_boosting_report(self.store)
+        rep = generate_boosting_report(self.store)
+        print(rep)
 
     @property
     def plot(self):

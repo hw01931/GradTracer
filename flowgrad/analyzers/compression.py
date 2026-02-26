@@ -501,7 +501,7 @@ class CompressionTracker:
         else:
             return f"Optimal config: {optimal_snap.config}. Performance: {retained:.1f}% retained."
 
-    def report(self) -> str:
+    def report(self) -> None:
         """Generate comprehensive compression diagnostic report."""
         lines = []
         lines.append("=" * 60)
@@ -517,7 +517,7 @@ class CompressionTracker:
             lines.append("=" * 60)
             report = "\n".join(lines)
             print(report)
-            return report
+            return
 
         # Snapshot comparison table
         lines.append("─" * 60)
@@ -591,7 +591,6 @@ class CompressionTracker:
         lines.append("=" * 60)
         report = "\n".join(lines)
         print(report)
-        return report
 
     @property
     def plot(self):

@@ -33,6 +33,9 @@ Instead of blindly pruning based on weight magnitude, FlowGrad uses training dyn
 *   **Quantization Guidance (`QuantizationAdvisor`):** Recommends mixed-precision (4/8/16-bit) based on layer-specific gradient SNR and weight variance.
 *   **Knowledge Distillation (`DistillationTracker`):** Identifies exactly which layers the student model is struggling to mimic from the teacher.
 
+### 3. Deep Tree Dynamics (v0.6)
+*   **Node-Level GBDT Tracking (`TreeDynamicsTracker`):** Unlike basic feature importance, FlowGrad unpacks the raw tree structure of models like XGBoost to track Leaf Velocity (Variance) and Feature Split Concentration. Evaluates mathematically if trees are stagnating or exploding.
+
 ## 🤖 AI Agent XML Export
 FlowGrad serves as a "Decision Layer" for AI coding assistants. By calling `.to_agent_xml()`, models receive exact logic and prescriptions.
 
@@ -57,10 +60,11 @@ print(tracker.to_agent_xml())
 </flowgrad_embedding_report>
 ```
 
-## 📊 Statistical Validation
-FlowGrad's recommendations are backed by formal statistical tests. As demonstrated in our [Validation Notebooks](examples/), our feature engineering and embedding prescriptions yield **Statistically Significant Improvements** measured via:
-*   **F-Test & Adjusted R²** for Feature Synergy recommendations.
+## 📊 Mathematical & Statistical Validation
+FlowGrad's recommendations are backed by formal statistical tests. As demonstrated in our [Validation Notebooks](examples/), our feature engineering and embedding prescriptions yield **Statistically Significant Improvements** mathematically guaranteed via:
+*   **F-Test & Adjusted R²** for Feature Synergy recommendations (Partial Correlation tests on out-of-sample variance).
 *   **Paired t-tests** demonstrating Variance Reduction and MSE improvements on MovieLens-100K MF baselines.
+*   **Cosine Similarity Tracking** guaranteeing true oscillatory embeddings rather than in-sample noise.
 
 ## 🚀 Quick Start
 ```bash
@@ -70,7 +74,7 @@ pip install git+https://github.com/hw01931/FlowGrad.git
 ## 🧩 Experimental Modules
 While optimized for RecSys and Compression, FlowGrad still includes its original v0.2/v0.3 modules for general ML tasks:
 *   `FlowTracker`: General PyTorch training stability (SNR, Stagnation).
-*   `BoostingTracker`: XGBoost / LightGBM tree dynamics.
+*   `BoostingTracker`: Traditional XGBoost / LightGBM tree dynamics.
 *   `FeatureAnalyzer`: VIF-filtered interaction suggestions.
 
 ## License

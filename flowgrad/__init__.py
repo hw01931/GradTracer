@@ -40,6 +40,7 @@ from flowgrad.analyzers.quantization import QuantizationAdvisor
 from flowgrad.analyzers.distillation import DistillationTracker
 from flowgrad.analyzers.peft import PEFTTracker
 from flowgrad.analyzers.embedding import EmbeddingTracker
+from flowgrad.analyzers.tree_dynamics import TreeDynamicsTracker
 from flowgrad.agent import AgentExporter
 from flowgrad.history import HistoryTracker
 
@@ -83,6 +84,7 @@ def info():
     print(f"  DistillationTracker  Knowledge distillation")
     print(f"  PEFTTracker          LoRA / adapter optimization")
     print(f"  EmbeddingTracker     RecSys embedding dynamics")
+    print(f"  TreeDynamicsTracker  GBDT node-level tracking")
     print(f"  AgentExporter        AI-native XML output")
     print("=" * 45)
 
@@ -98,6 +100,7 @@ __all__ = [
     "DistillationTracker",
     "PEFTTracker",
     "EmbeddingTracker",
+    "TreeDynamicsTracker",
     "AgentExporter",
     "HistoryTracker",
     "info",

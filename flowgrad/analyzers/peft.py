@@ -206,7 +206,7 @@ class PEFTTracker:
             "recommendation": rec,
         }
 
-    def report(self) -> str:
+    def report(self) -> None:
         """Generate PEFT diagnostics report."""
         lines = ["─" * 55, "🔌 PEFT / LoRA Diagnostics", "─" * 55]
 
@@ -242,7 +242,6 @@ class PEFTTracker:
 
         report = "\n".join(lines)
         print(report)
-        return report
 
     def to_agent_xml(self) -> str:
         """Export PEFT analysis as XML for AI agents."""

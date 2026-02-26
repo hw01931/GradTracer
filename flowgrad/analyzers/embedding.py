@@ -181,7 +181,7 @@ class EmbeddingTracker:
             "gini": bias["gini"]
         }
 
-    def report(self) -> str:
+    def report(self) -> None:
         s = self.summary()
         lines = []
         lines.append("=" * 60)
@@ -195,23 +195,22 @@ class EmbeddingTracker:
         
         lines.append("")
         lines.append("⚠️  Alerts & Prescriptions")
-        if s['dead_pct'] > 50:
+        if s['dead_pct'] > 5.0:
              lines.append(f"  💀 HIGH DEAD RATE ({s['dead_pct']:.1f}%)")
              lines.append(f"     💊 Recommendation: Downsample negative items, or apply hashing trick.")
-        if s['zombie_pct'] > 5:
+        if s['zombie_pct'] > 2.0:
              lines.append(f"  🧟 ZOMBIE COLLAPSE ({s['zombie_pct']:.1f}%)")
              lines.append(f"     💊 Recommendation: Reduce learning rate for sparse parameters (use SparseAdam), or increase batch size to smooth conflicting gradients.")
-        if s['gini'] > 0.8:
+        if s['gini'] > 0.4:
              lines.append(f"  🎯 EXTREME POPULARITY BIAS (Gini: {s['gini']:.2f})")
              lines.append(f"     💊 Recommendation: Apply log-Q correction to logits, or use inverse/log-frequency sampling for positive items.")
              
-        if not (s['dead_pct'] > 50 or s['zombie_pct'] > 5 or s['gini'] > 0.8):
+        if not (s['dead_pct'] > 5.0 or s['zombie_pct'] > 2.0 or s['gini'] > 0.4):
              lines.append("  ✅ Embedding dynamics are healthy.")
         
         lines.append("=" * 60)
         rep = "\n".join(lines)
         print(rep)
-        return rep
         
     def detach(self):
         if hasattr(self, '_hook'):

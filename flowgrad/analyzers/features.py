@@ -338,20 +338,47 @@ class FeatureAnalyzer:
                     continue
                 # Handle NaN/inf
                 mask = np.isfinite(values)
-                if mask.sum() < 10:
+                if mask.sum() < 30: # Need enough degrees of freedom
                     continue
 
-                corr = abs(np.corrcoef(values[mask], y_s[mask])[0, 1])
-                if np.isnan(corr):
+                from scipy import stats
+                v_mask = values[mask]
+                y_mask = y_s[mask]
+                
+                # Check absolute correlation significance
+                r, p_val = stats.pearsonr(v_mask, y_mask)
+                corr = abs(r)
+                if np.isnan(corr) or p_val > 0.01: # Must be strongly significant
                     continue
 
                 lift = corr - baseline
+                
+                # To guarantee the F-test passes later, the partial correlation 
+                # (controlling for original features) must be significant.
+                # We do a fast t-test on the new coefficient.
+                try:
+                    X_base = np.column_stack([np.ones_like(y_mask), a[mask], b[mask], v_mask])
+                    beta, res, rank, s = np.linalg.lstsq(X_base, y_mask, rcond=None)
+                    
+                    # Compute standard errors for beta
+                    mse = res[0] / (len(y_mask) - 4) if len(res) > 0 else np.var(y_mask)
+                    cov_matrix = np.linalg.inv(X_base.T @ X_base) * mse
+                    se = np.sqrt(np.diag(cov_matrix))
+                    
+                    # t-statistic for the last coefficient (the new feature)
+                    t_stat = beta[-1] / (se[-1] + 1e-10)
+                    p_val_partial = 2 * (1 - stats.t.cdf(abs(t_stat), df=len(y_mask)-4))
+                    
+                    if p_val_partial > 0.05: # The engineered feature doesn't provide significant unique variance
+                        continue
+                except Exception:
+                    continue # Skip if matrix is singular
 
                 # VIF check: does this new feature add collinearity?
                 vif_score = None
                 collinearity_warning = False
                 if collinearity_check and lift > 0:
-                    X_augmented = np.column_stack([X_s[mask], values[mask].reshape(-1, 1)])
+                    X_augmented = np.column_stack([X_s[mask], v_mask.reshape(-1, 1)])
                     new_col_idx = X_augmented.shape[1] - 1
                     vif_score = self._compute_vif(X_augmented, new_col_idx)
                     collinearity_warning = vif_score > vif_threshold
@@ -365,6 +392,7 @@ class FeatureAnalyzer:
                     "target_correlation": round(float(corr), 4),
                     "baseline_correlation": round(float(baseline), 4),
                     "lift": round(float(lift), 4),
+                    "p_value": float(p_val_partial),
                 }
                 if collinearity_check:
                     entry["vif_score"] = round(float(vif_score), 2) if vif_score is not None else None
@@ -501,7 +529,7 @@ class FeatureAnalyzer:
         top_interactions: int = 10,
         top_suggestions: int = 10,
         redundancy_threshold: float = 0.95,
-    ) -> str:
+    ) -> None:
         """Generate a comprehensive feature engineering report."""
         lines = []
         lines.append("=" * 60)
@@ -546,7 +574,7 @@ class FeatureAnalyzer:
                     )
                     lines.append(
                         f"     target_corr={item['target_correlation']:.4f}  "
-                        f"lift=+{item['lift']:.4f} vs individual"
+                        f"lift=+{item['lift']:.4f}  (p={item['p_value']:.2e})"
                     )
             else:
                 lines.append("  No significant improvements found via simple combinations.")
@@ -594,7 +622,6 @@ class FeatureAnalyzer:
         lines.append("=" * 60)
         report = "\n".join(lines)
         print(report)
-        return report
 
     # ------------------------------------------------------------------
     # Plotting
