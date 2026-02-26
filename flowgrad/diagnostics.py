@@ -128,7 +128,6 @@ def generate_dl_report(store: SnapshotStore, top_k: int = 5) -> str:
 
     lines.append("=" * 60)
     report = "\n".join(lines)
-    print(report)
     return report
 
 
@@ -277,5 +276,4 @@ def generate_boosting_report(store: BoostingStore) -> str:
 
     lines.append("=" * 60)
     report = "\n".join(lines)
-    print(report)
     return report

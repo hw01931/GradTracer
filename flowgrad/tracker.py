@@ -211,13 +211,15 @@ class FlowTracker:
 
     def report(self, top_k: int = 5) -> str:
         """
-        Generate a text diagnostic report of the training so far.
+        Generate and print a text diagnostic report of the training so far.
 
         Returns:
             str: Formatted diagnostic report.
         """
         from flowgrad.diagnostics import generate_dl_report
-        return generate_dl_report(self.store, top_k=top_k)
+        rep = generate_dl_report(self.store, top_k=top_k)
+        print(rep)
+        return rep
 
     @property
     def plot(self):

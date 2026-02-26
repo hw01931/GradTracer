@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flowgrad"
-version = "0.4.0"
+version = "0.5.0"
 description = "One-line training diagnostics & feature engineering for DL, ML, and RecSys. Track dynamics, discover feature synergies, get automated prescriptions."
 readme = "README.md"
 license = {text = "MIT"}

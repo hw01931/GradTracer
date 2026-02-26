@@ -28,7 +28,7 @@ Usage (AI Agent Mode):
     print(xml)  # AI reads this and auto-applies fixes
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from flowgrad.tracker import FlowTracker
 from flowgrad.analyzers.boosting import BoostingTracker
@@ -39,6 +39,7 @@ from flowgrad.analyzers.saliency import SaliencyAnalyzer
 from flowgrad.analyzers.quantization import QuantizationAdvisor
 from flowgrad.analyzers.distillation import DistillationTracker
 from flowgrad.analyzers.peft import PEFTTracker
+from flowgrad.analyzers.embedding import EmbeddingTracker
 from flowgrad.agent import AgentExporter
 from flowgrad.history import HistoryTracker
 
@@ -81,6 +82,7 @@ def info():
     print(f"  QuantizationAdvisor  Mixed-precision guidance")
     print(f"  DistillationTracker  Knowledge distillation")
     print(f"  PEFTTracker          LoRA / adapter optimization")
+    print(f"  EmbeddingTracker     RecSys embedding dynamics")
     print(f"  AgentExporter        AI-native XML output")
     print("=" * 45)
 
@@ -95,6 +97,7 @@ __all__ = [
     "QuantizationAdvisor",
     "DistillationTracker",
     "PEFTTracker",
+    "EmbeddingTracker",
     "AgentExporter",
     "HistoryTracker",
     "info",
