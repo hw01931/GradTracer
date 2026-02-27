@@ -95,27 +95,10 @@ def _scan_architecture(model) -> Dict[str, Any]:
     }
 
 
-# ======================================================================
-#  XML Builder Helpers
-# ======================================================================
-
-def _tag(name: str, content: str, indent: int = 2, **attrs) -> str:
-    """Multi-line XML tag with optional attributes."""
-    sp = " " * indent
-    attr_str = "".join([f' {k}="{escape(str(v))}"' for k, v in attrs.items()])
-    inner = textwrap.indent(content.strip(), sp + "  ")
-    return f"{sp}<{name}{attr_str}>\n{inner}\n{sp}</{name}>"
-
-
-def _line(name: str, value: Any, indent: int = 2, **attrs) -> str:
-    """Single-line XML tag with optional attributes."""
-    sp = " " * indent
-    attr_str = "".join([f' {k}="{escape(str(v))}"' for k, v in attrs.items()])
-    return f"{sp}<{name}{attr_str}>{escape(str(value))}</{name}>"
-
+import json
 
 # ======================================================================
-#  Agent Exporter with Causal Meta-Diagnostics
+#  Agent Exporter with Causal Meta-Diagnostics (JSON Standard)
 # ======================================================================
 
 class AgentExporter:
@@ -156,19 +139,19 @@ class AgentExporter:
         is_adaptive = opt_info.get("is_adaptive", False)
 
         # ── 2. Causal Engine: Evaluate Rules ────────────────────────
-        findings_xml = []
+        findings_json = []
         issue_summaries = []
 
         # A. Inconsistency Detection (Zero LR but loss changing)
         if current_lr == 0.0 and loss_is_improving:
-            xml = "\n".join([
-                _line("premise", "Learning rate is 0.0 but loss is significantly decreasing.", 0),
-                _line("implies", "Major inconsistency: weights might be frozen while other params learn, or scheduler is detached.", 0),
-                _line("action", "CHECK_CODE_LOGIC", 0),
-                _line("expected_effect", "Resolve ghost updates and ensure reproducible training.", 0),
-                _line("confidence", "0.95", 0)
-            ])
-            findings_xml.append(_tag("causal_model", xml, type="INCONSISTENCY_DETECTED", indent=4))
+            findings_json.append({
+                "type": "INCONSISTENCY_DETECTED",
+                "premise": "Learning rate is 0.0 but loss is significantly decreasing.",
+                "implies": "Major inconsistency: weights might be frozen while other params learn, or scheduler is detached.",
+                "action": "CHECK_CODE_LOGIC",
+                "expected_effect": "Resolve ghost updates and ensure reproducible training.",
+                "confidence": 0.95
+            })
             issue_summaries.append("LR_INCONSISTENCY")
 
         # B. Low SNR Analysis (False Positive Suppression)
@@ -179,48 +162,48 @@ class AgentExporter:
             avg_snr = sum(low_snr_layers.values()) / len(low_snr_layers)
             if loss_is_improving and is_adaptive:
                 # Suppression Logic: Benign Noise in Adaptive Optimizer
-                xml = "\n".join([
-                    _line("premise", f"Low gradient SNR (<0.01) detected in {len(low_snr_layers)} layers, BUT loss is actively decreasing and Adam/Adaptive optimizer is used.", 0),
-                    _line("implies", "Benign noise. Adaptive optimizers absorb raw variance. The model is in a stable fine-tuning phase despite high stochasticity.", 0),
-                    _line("action", "NO_INTERVENTION_REQUIRED", 0),
-                    _line("expected_effect", "Suppress false alarms. Continue training.", 0),
-                    _line("confidence", "0.85", 0)
-                ])
-                findings_xml.append(_tag("causal_model", xml, type="BENIGN_NOISE", indent=4))
+                findings_json.append({
+                    "type": "BENIGN_NOISE",
+                    "premise": f"Low gradient SNR (<0.01) detected in {len(low_snr_layers)} layers, BUT loss is actively decreasing and Adam/Adaptive optimizer is used.",
+                    "implies": "Benign noise. Adaptive optimizers absorb raw variance. The model is in a stable fine-tuning phase despite high stochasticity.",
+                    "action": "NO_INTERVENTION_REQUIRED",
+                    "expected_effect": "Suppress false alarms. Continue training.",
+                    "confidence": 0.85
+                })
             else:
                 # Legitimate Low SNR Alert
-                xml = "\n".join([
-                    _line("premise", f"Low SNR (<0.01) in {len(low_snr_layers)} layers and loss is NOT improving.", 0),
-                    _line("implies", "Optimizer is taking random walks. Gradient noise is dominating the descent signal.", 0),
-                    _line("action", "INCREASE_BATCH_SIZE_OR_REDUCE_LR", 0),
-                    _line("expected_effect", "Reduce gradient variance to restore directional descent.", 0),
-                    _line("risk", "May slow down epoch processing time if batch size is increased.", 0),
-                    _line("confidence", "0.75", 0)
-                ])
-                findings_xml.append(_tag("causal_model", xml, type="HARMFUL_LOW_SNR", indent=4))
+                findings_json.append({
+                    "type": "HARMFUL_LOW_SNR",
+                    "premise": f"Low SNR (<0.01) in {len(low_snr_layers)} layers and loss is NOT improving.",
+                    "implies": "Optimizer is taking random walks. Gradient noise is dominating the descent signal.",
+                    "action": "INCREASE_BATCH_SIZE_OR_REDUCE_LR",
+                    "expected_effect": "Reduce gradient variance to restore directional descent.",
+                    "risk": "May slow down epoch processing time if batch size is increased.",
+                    "confidence": 0.75
+                })
                 issue_summaries.append("LOW_SNR")
 
         # C. Stagnation Analysis
         stagnant = detect_stagnation(store)
         if stagnant:
             if loss_is_improving:
-                xml = "\n".join([
-                    _line("premise", f"{len(stagnant)} layers have near-zero velocity, but overall loss is decreasing.", 0),
-                    _line("implies", "These specific layers have converged early or are redundant, while other layers drive the loss.", 0),
-                    _line("action", "CONSIDER_PRUNING", 0),
-                    _line("expected_effect", "Remove dead weights to compress model without hurting current descent trajectory.", 0),
-                    _line("confidence", "0.80", 0)
-                ])
-                findings_xml.append(_tag("causal_model", xml, type="SAFE_STAGNATION", indent=4))
+                findings_json.append({
+                    "type": "SAFE_STAGNATION",
+                    "premise": f"{len(stagnant)} layers have near-zero velocity, but overall loss is decreasing.",
+                    "implies": "These specific layers have converged early or are redundant, while other layers drive the loss.",
+                    "action": "CONSIDER_PRUNING",
+                    "expected_effect": "Remove dead weights to compress model without hurting current descent trajectory.",
+                    "confidence": 0.80
+                })
             else:
-                xml = "\n".join([
-                    _line("premise", f"{len(stagnant)} layers stagnated and loss is plateaued.", 0),
-                    _line("implies", "Learning has halted prematurely due to vanishing gradients or excessive regularization.", 0),
-                    _line("action", "INCREASE_LR_OR_REMOVE_WEIGHT_DECAY", 0),
-                    _line("expected_effect", "Force parameters out of local plateau.", 0),
-                    _line("confidence", "0.90", 0)
-                ])
-                findings_xml.append(_tag("causal_model", xml, type="HARMFUL_STAGNATION", indent=4))
+                findings_json.append({
+                    "type": "HARMFUL_STAGNATION",
+                    "premise": f"{len(stagnant)} layers stagnated and loss is plateaued.",
+                    "implies": "Learning has halted prematurely due to vanishing gradients or excessive regularization.",
+                    "action": "INCREASE_LR_OR_REMOVE_WEIGHT_DECAY",
+                    "expected_effect": "Force parameters out of local plateau.",
+                    "confidence": 0.90
+                })
                 issue_summaries.append("STAGNATION")
 
         # D. Dead Neurons
@@ -231,14 +214,14 @@ class AgentExporter:
                 dead_layers.append(name)
                 
         if dead_layers:
-            xml = "\n".join([
-                _line("premise", f">50% parameters near zero in layers: {', '.join(dead_layers[:3])}...", 0),
-                _line("implies", "Activation collapse (e.g., dying ReLU) or extreme sparsity regime.", 0),
-                _line("action", "REPLACE_RELU_WITH_LEAKYRELU_OR_GELU", 0),
-                _line("expected_effect", "Allow gradients to flow through negative pre-activations to revive neurons.", 0),
-                _line("confidence", "0.88", 0)
-            ])
-            findings_xml.append(_tag("causal_model", xml, type="DEAD_NEURON_COLLAPSE", indent=4))
+            findings_json.append({
+                "type": "DEAD_NEURON_COLLAPSE",
+                "premise": f">50% parameters near zero in layers: {', '.join(dead_layers[:3])}...",
+                "implies": "Activation collapse (e.g., dying ReLU) or extreme sparsity regime.",
+                "action": "REPLACE_RELU_WITH_LEAKYRELU_OR_GELU",
+                "expected_effect": "Allow gradients to flow through negative pre-activations to revive neurons.",
+                "confidence": 0.88
+            })
             issue_summaries.append("DEAD_NEURONS")
 
         # ── 3. Build Run Data for History ───────────────────────────
@@ -256,136 +239,124 @@ class AgentExporter:
         if save:
             HistoryTracker.append_run(run_data)
 
-        # ── 4. Assemble XML ─────────────────────────────────────────
-        xml_parts = ['<gradtracer_agent_report>']
+        # ── 4. Assemble JSON ─────────────────────────────────────────
+        report = {
+            "gradtracer_agent_report": {
+                "environment": {
+                    "optimizer": opt_info["str"],
+                    "lr_scheduler": sched_info["str"]
+                },
+                "model_architecture": {
+                    "total_params": f"{arch['total_params']/1e6:.2f}M",
+                    "trainable_params": f"{arch['trainable_params']/1e6:.2f}M",
+                    "normalization_layers": arch["normalization_layers"],
+                    "dropout_layers": arch["dropout_layers"],
+                    "activations": arch["activations"]
+                }
+            }
+        }
 
         # A. History
         if include_history:
             past = HistoryTracker.get_recent_runs(n=5)
             past = [r for r in past if r.get("run_id") != run_name]
             if past:
-                hist_lines = []
-                for r in past[-3:]:
-                    issues_str = ", ".join(r.get("issues", [])) or "None"
-                    hist_lines.append(
-                        _tag("run", "\n".join([
-                            _line("id", r.get("run_id", "?"), 0),
-                            _line("timestamp", r.get("timestamp", "?"), 0),
-                            _line("optimizer", r.get("optimizer", "?"), 0),
-                            _line("steps", r.get("steps", "?"), 0),
-                            _line("final_loss", r.get("final_loss", "?"), 0),
-                            _line("issues", issues_str, 0),
-                            _line("avg_health", r.get("avg_health", "?"), 0),
-                        ]), indent=4)
-                    )
-                xml_parts.append(_tag("experiment_history", "\n".join(hist_lines)))
+                report["gradtracer_agent_report"]["experiment_history"] = past[-3:]
 
-        # B. Environment
-        env = "\n".join([
-            _line("optimizer", opt_info["str"], 4),
-            _line("lr_scheduler", sched_info["str"], 4),
-        ])
-        xml_parts.append(_tag("environment", env))
-
-        # C. Architecture
-        arch_lines = "\n".join([
-            _line("total_params", f"{arch['total_params']/1e6:.2f}M", 4),
-            _line("trainable_params", f"{arch['trainable_params']/1e6:.2f}M", 4),
-            _line("normalization_layers", arch["normalization_layers"], 4),
-            _line("dropout_layers", arch["dropout_layers"], 4),
-            _line("activations", ", ".join(arch["activations"]), 4),
-        ])
-        xml_parts.append(_tag("model_architecture", arch_lines))
-
-        # D. Training State
-        state_lines = [_line("current_step", store.num_steps, 4)]
+        # B. Training State
+        state = {"current_step": store.num_steps}
         if valid_losses:
-            state_lines.append(_line("initial_loss", f"{valid_losses[0]:.4f}", 4))
-            state_lines.append(_line("current_loss", f"{valid_losses[-1]:.4f}", 4))
+            state["initial_loss"] = round(valid_losses[0], 4)
+            state["current_loss"] = round(valid_losses[-1], 4)
             if len(valid_losses) > 1:
-                state_lines.append(_line("loss_trend", f"{loss_trend:+.4f}", 4))
-                state_lines.append(_line("min_loss", f"{min(valid_losses):.4f}", 4))
-        xml_parts.append(_tag("training_state", "\n".join(state_lines)))
+                state["loss_trend"] = round(loss_trend, 4)
+                state["min_loss"] = round(min(valid_losses), 4)
+        report["gradtracer_agent_report"]["training_state"] = state
 
-        # E. Causal Diagnostics
-        if findings_xml:
-            xml_parts.append(_tag("diagnostics", "\n".join(findings_xml)))
+        # C. Causal Diagnostics
+        if findings_json:
+            report["gradtracer_agent_report"]["diagnostics"] = findings_json
         else:
-            status = _line("status", "HEALTHY — No critical issues or inconsistencies detected.", 0)
-            xml_parts.append(_tag("diagnostics", status))
+            report["gradtracer_agent_report"]["diagnostics"] = {
+                "status": "HEALTHY — No critical issues or inconsistencies detected."
+            }
 
-        # F. Layer Health Summary
+        # D. Layer Health Summary
         health_lines = []
         for name in sorted(health, key=lambda k: health[k]):
             score = health[name]
             status = "CRITICAL" if score < 40 else "WARNING" if score < 70 else "HEALTHY"
-            health_lines.append(
-                f'    <layer name="{escape(name)}" health="{score:.0f}" status="{status}" />'
-            )
-        xml_parts.append(_tag("layer_health_summary", "\n".join(health_lines)))
+            health_lines.append({
+                "layer": name,
+                "health": round(score, 0),
+                "status": status
+            })
+        report["gradtracer_agent_report"]["layer_health_summary"] = health_lines
 
-        xml_parts.append("</gradtracer_agent_report>")
-        return "\n\n".join(xml_parts)
+        return json.dumps(report, indent=2)
 
     @classmethod
     def export_embedding(cls, tracker, save: bool = False) -> str:
         """
-        Export causal XML diagnostics specifically for an EmbeddingTracker.
+        Export causal JSON diagnostics specifically for an EmbeddingTracker.
         """
-        xml_parts = [f'<gradtracer_embedding_report layer="{escape(tracker.name)}">']
-        findings_xml = []
+        report = {
+            "gradtracer_embedding_report": {
+                "layer": tracker.name
+            }
+        }
+        findings_json = []
         
         summary = tracker.summary()
         
         # Matrix Stats
-        stats = "\n".join([
-            _line("num_embeddings", summary["num_embeddings"], 4),
-            _line("active_coverage_pct", f"{summary['coverage_pct']:.1f}", 4),
-            _line("popularity_gini", f"{summary['gini']:.3f}", 4),
-        ])
-        xml_parts.append(_tag("embedding_stats", stats))
+        report["gradtracer_embedding_report"]["embedding_stats"] = {
+            "num_embeddings": summary["num_embeddings"],
+            "active_coverage_pct": round(summary["coverage_pct"], 1),
+            "popularity_gini": round(summary["gini"], 3)
+        }
         
         # 1. Zombie Embeddings
         if summary["zombie_pct"] > 5.0:
-            xml = "\n".join([
-                _line("premise", f"{summary['zombie_pct']:.1f}% of embeddings have high update velocity but strictly alternating/negative cosine similarity between steps.", 0),
-                _line("implies", "Optimizer is oscillating. Conflicting gradients from different users/items are pulling these embeddings back and forth without generalizing.", 0),
-                _line("action", "DECREASE_LR_BETA_OR_USE_SPARSE_ADAM", 0),
-                _line("expected_effect", "Smooth out the trajectory of rare/conflicted items and prevent representation collapse.", 0),
-                _line("confidence", "0.92", 0)
-            ])
-            findings_xml.append(_tag("causal_model", xml, type="ZOMBIE_EMBEDDINGS", indent=4))
+            findings_json.append({
+                "type": "ZOMBIE_EMBEDDINGS",
+                "premise": f"{summary['zombie_pct']:.1f}% of embeddings have high update velocity but strictly alternating/negative cosine similarity between steps.",
+                "implies": "Optimizer is oscillating. Conflicting gradients from different users/items are pulling these embeddings back and forth without generalizing.",
+                "action": "DECREASE_LR_BETA_OR_USE_SPARSE_ADAM",
+                "expected_effect": "Smooth out the trajectory of rare/conflicted items and prevent representation collapse.",
+                "confidence": 0.92
+            })
             
         # 2. Dead Embeddings
         if summary["dead_pct"] > 50.0:
-            xml = "\n".join([
-                _line("premise", f"{summary['dead_pct']:.1f}% of embeddings have never received a gradient update.", 0),
-                _line("implies", "Severe cold-start sparsity or broken dataloader negative sampling.", 0),
-                _line("action", "DOWNSAMPLE_NEGATIVES_OR_USE_HASHING_TRICK", 0),
-                _line("expected_effect", "Increase sample efficiency and reduce memory footprint of dead parameters.", 0),
-                _line("confidence", "0.88", 0)
-            ])
-            findings_xml.append(_tag("causal_model", xml, type="DEAD_EMBEDDINGS", indent=4))
+            findings_json.append({
+                "type": "DEAD_EMBEDDINGS",
+                "premise": f"{summary['dead_pct']:.1f}% of embeddings have never received a gradient update.",
+                "implies": "Severe cold-start sparsity or broken dataloader negative sampling.",
+                "action": "DOWNSAMPLE_NEGATIVES_OR_USE_HASHING_TRICK",
+                "expected_effect": "Increase sample efficiency and reduce memory footprint of dead parameters.",
+                "confidence": 0.88
+            })
             
         # 3. Popularity Bias
         if summary["gini"] > 0.8:
-            xml = "\n".join([
-                _line("premise", f"Exposure distribution is highly skewed (Gini coefficient: {summary['gini']:.2f} > 0.8).", 0),
-                _line("implies", "Model is predominantly optimizing for top-popular items. Long-tail embeddings will suffer from inadequate learning.", 0),
-                _line("action", "APPLY_LOG_Q_CORRECTION_OR_INVERSE_FREQUENCY_SAMPLING", 0),
-                _line("expected_effect", "Debias the softmax logits and improve long-tail recommendation coverage.", 0),
-                _line("risk", "May slightly drop overall accuracy (HR@10) on heavily skewed test sets.", 0),
-                _line("confidence", "0.95", 0)
-            ])
-            findings_xml.append(_tag("causal_model", xml, type="POPULARITY_BIAS", indent=4))
+            findings_json.append({
+                "type": "POPULARITY_BIAS",
+                "premise": f"Exposure distribution is highly skewed (Gini coefficient: {summary['gini']:.2f} > 0.8).",
+                "implies": "Model is predominantly optimizing for top-popular items. Long-tail embeddings will suffer from inadequate learning.",
+                "action": "APPLY_LOG_Q_CORRECTION_OR_INVERSE_FREQUENCY_SAMPLING",
+                "expected_effect": "Debias the softmax logits and improve long-tail recommendation coverage.",
+                "risk": "May slightly drop overall accuracy (HR@10) on heavily skewed test sets.",
+                "confidence": 0.95
+            })
 
         # Assemble Diagnostics
-        if findings_xml:
-            xml_parts.append(_tag("diagnostics", "\n".join(findings_xml)))
+        if findings_json:
+            report["gradtracer_embedding_report"]["diagnostics"] = findings_json
         else:
-            status = _line("status", "HEALTHY — Embedding matrix shows stable learning dynamics and adequate coverage.", 0)
-            xml_parts.append(_tag("diagnostics", status))
+            report["gradtracer_embedding_report"]["diagnostics"] = {
+                "status": "HEALTHY — Embedding matrix shows stable learning dynamics and adequate coverage."
+            }
 
-        xml_parts.append("</gradtracer_embedding_report>")
-        return "\n\n".join(xml_parts)
+        return json.dumps(report, indent=2)
 

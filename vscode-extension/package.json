@@ -1,0 +1,35 @@
+{
+    "name": "gradtracer-vscode",
+    "displayName": "GradTracer AI-Native Diagnostics",
+    "description": "Real-time AI model compression & health diagnostics directly in your editor.",
+    "version": "0.1.0",
+    "engines": {
+        "vscode": "^1.80.0"
+    },
+    "categories": [
+        "Machine Learning",
+        "Linters"
+    ],
+    "activationEvents": [
+        "onLanguage:python"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "gradtracer.applyRecipe",
+                "title": "GradTracer: Apply Compression Recipe"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.80.0",
+        "@types/node": "18.x",
+        "typescript": "^5.1.3"
+    }
+}

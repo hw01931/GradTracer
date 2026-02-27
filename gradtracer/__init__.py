@@ -40,9 +40,13 @@ from gradtracer.analyzers.quantization import QuantizationAdvisor
 from gradtracer.analyzers.distillation import DistillationTracker
 from gradtracer.analyzers.peft import PEFTTracker
 from gradtracer.analyzers.embedding import EmbeddingTracker
+from gradtracer.analyzers.manager import FlowManager
 from gradtracer.analyzers.tree_dynamics import TreeDynamicsTracker
+from gradtracer.analyzers.recipes import RecipeGenerator
 from gradtracer.agent import AgentExporter
 from gradtracer.history import HistoryTracker
+from gradtracer.audit import AutoFixAuditLogger
+from gradtracer.wandb import log_to_wandb
 
 
 def info():
@@ -100,9 +104,13 @@ __all__ = [
     "DistillationTracker",
     "PEFTTracker",
     "EmbeddingTracker",
+    "FlowManager",
     "TreeDynamicsTracker",
+    "RecipeGenerator",
     "AgentExporter",
     "HistoryTracker",
+    "AutoFixAuditLogger",
+    "log_to_wandb",
     "info",
     "__version__",
 ]

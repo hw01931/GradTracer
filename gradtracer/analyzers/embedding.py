@@ -62,6 +62,10 @@ class EmbeddingTracker:
         self._prev_weights = None
         self.steps = 0
         
+        # Transparent Logging to avoid "black box" reproducibility issues
+        from gradtracer.audit import AutoFixAuditLogger
+        self.audit_logger = AutoFixAuditLogger(run_id=self.name) if self.auto_fix else None
+        
         # Register backward hook to intercept gradients
         self._active_indices = None
         self._hook = self.layer.weight.register_hook(self._grad_hook)
@@ -183,6 +187,8 @@ class EmbeddingTracker:
                     zombies = self.zombie_embeddings()
                     if len(zombies) > 0:
                         scales[zombies] = 0.1
+                        if self.audit_logger:
+                            self.audit_logger.log_intervention(self.steps, self.name, "zombie_penalty", zombies, 0.1)
                         
                     # Dead revival (Inject minor exploration momentum if never updated)
                     # In a real setup, we might add uniform noise to their gradients, 
@@ -190,6 +196,8 @@ class EmbeddingTracker:
                     revivals = np.where(self.freqs == 0)[0]
                     if len(revivals) > 0:
                         scales[revivals] = 1.5
+                        if self.audit_logger:
+                            self.audit_logger.log_intervention(self.steps, self.name, "dead_revival", revivals.tolist(), 1.5)
                         
                     self._zombie_mask_tensor = torch.tensor(scales).unsqueeze(1)
             
@@ -293,6 +301,12 @@ class EmbeddingTracker:
              
         if not (s['dead_pct'] > 5.0 or s['zombie_pct'] > 2.0 or s['gini'] > 0.4):
              lines.append("  ✅ Embedding dynamics are healthy.")
+             
+        if self.auto_fix and self.audit_logger:
+             audit_summary = self.audit_logger.summary()
+             if audit_summary.get("total_events", 0) > 0:
+                 lines.append("")
+                 lines.append(f"  📝 Auto-Fix Audit: {audit_summary['total_events']} interventions logged to `.gradtracer/audit.jsonl`")
         
         lines.append("=" * 60)
         rep = "\n".join(lines)
