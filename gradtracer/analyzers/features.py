@@ -404,6 +404,26 @@ class FeatureAnalyzer:
         results.sort(key=lambda x: x["lift"], reverse=True)
         return results[:top_k]
 
+    def multicollinearity(self, threshold: float = 10.0) -> Dict[str, Any]:
+        """
+        Examines the feature matrix for severe multicollinearity using VIF.
+        """
+        warnings_list = []
+        n_features = len(self.feature_names)
+        for i in range(n_features):
+            vif = self._compute_vif(self.X, i)
+            if vif > threshold:
+                warnings_list.append({
+                    "feature": self.feature_names[i],
+                    "vif": float(vif)
+                })
+        warnings_list.sort(key=lambda x: x['vif'], reverse=True)
+        
+        return {
+            "threshold": threshold,
+            "warnings": warnings_list
+        }
+
     # ------------------------------------------------------------------
     # 3. Redundant Feature Detection
     # ------------------------------------------------------------------

@@ -66,6 +66,7 @@ class FlowTracker:
         optimizer=None,
         scheduler=None,
         run_name: str = "current_run",
+        track_interval: int = 1,
     ):
         torch = _get_torch()
 
@@ -77,6 +78,7 @@ class FlowTracker:
         self.optimizer = optimizer
         self.scheduler = scheduler
         self.run_name = run_name
+        self.track_interval = track_interval
         self.store = SnapshotStore()
 
         self._step_count = 0
@@ -162,6 +164,10 @@ class FlowTracker:
             loss=loss,
             metrics=metrics or {},
         )
+
+        if self._step_count % self.track_interval != 0:
+            self.store.add_step(record)
+            return
 
         for name in self._param_names:
             param = self._params[name]
