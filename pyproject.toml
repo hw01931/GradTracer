@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gradtracer"
-version = "0.7.6"
+version = "0.7.7"
 description = "Flow-based Diagnostics for Embedding Systems & Compression"
 readme = "README.md"
 license = {text = "MIT"}
