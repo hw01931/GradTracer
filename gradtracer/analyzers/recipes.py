@@ -24,6 +24,7 @@ class RecipeGenerator:
         Produce the joint compression recipe based on layer health and saliency.
         """
         from gradtracer.analyzers.health import layer_health_score, gradient_snr_per_layer
+        import numpy as np
         
         health_scores = layer_health_score(self.store)
         snr_data = gradient_snr_per_layer(self.store)
@@ -33,8 +34,39 @@ class RecipeGenerator:
         total_flops_baseline = 0.0
         total_flops_remaining = 0.0
         
-        health_scores = layer_health_score(self.store)
-        snr_data = gradient_snr_per_layer(self.store)
+        # 1. First pass to find prunable layers and their saliencies
+        prunable_layers = []
+        activity_scores = {}
+        for layer_name in self.store.layer_names:
+            history = self.store.get_layer_history(layer_name)
+            if not history:
+                continue
+            
+            module_type = "Unknown"
+            numel = getattr(history[-1], 'num_params', 0)
+            if hasattr(self.tracker, "model"):
+                mod_name = layer_name.rsplit('.', 1)[0]
+                try:
+                    mod = self.tracker.model.get_submodule(mod_name)
+                    module_type = type(mod).__name__
+                    param = getattr(mod, layer_name.split('.')[-1], None)
+                    if param is not None:
+                         numel = param.numel()
+                except Exception:
+                    pass
+            
+            is_1d = (numel < 1000) or ("bias" in layer_name.lower())
+            is_sensitive = ("Norm" in module_type) or ("Embedding" in module_type) or ("classifier" in layer_name.lower()) or ("pooler" in layer_name.lower())
+            is_prunable = ("Linear" in module_type or "Conv" in module_type) and not is_1d and not is_sensitive
+            
+            if is_prunable:
+                prunable_layers.append(layer_name)
+                health = health_scores.get(layer_name, 50)
+                latest = history[-1]
+                saliency = (latest.weight_norm + 1e-9) * health
+                activity_scores[layer_name] = saliency
+                
+        mean_saliency = np.mean(list(activity_scores.values())) if activity_scores else 1.0
         
         recipe = {
             "metadata": {
@@ -52,12 +84,10 @@ class RecipeGenerator:
             # Extract module metadata
             module_type = "Unknown"
             shape = []
-            numel = 0
+            numel = getattr(history[-1], 'num_params', 0)
             if hasattr(self.tracker, "model"):
-                # Clean name (e.g., 'layer1.0.conv1.weight' -> 'layer1.0.conv1')
                 mod_name = layer_name.rsplit('.', 1)[0]
                 try:
-                    # In PyTorch, models can be accessed via get_submodule
                     mod = self.tracker.model.get_submodule(mod_name)
                     module_type = type(mod).__name__
                     param = getattr(mod, layer_name.split('.')[-1], None)
@@ -66,47 +96,39 @@ class RecipeGenerator:
                          numel = param.numel()
                 except Exception:
                     pass
-            
-            # Fallback if param extraction failed
-            if numel == 0 and hasattr(history[-1], 'num_params'):
-                numel = history[-1].num_params
 
             last_entry = history[-1]
             health = health_scores.get(layer_name, 100)
-            snr = snr_data.get(layer_name, [0.0])[-1] if snr_data.get(layer_name) else 0.0
+            
+            is_prunable = layer_name in prunable_layers
             
             # Rule Engine for Mixed-Precision & Pruning
-            
-            # 1. Critical Information Layers (High variance, active learning)
-            if snr > 1.0 or health > 90:
-                quant = "FP16"  # Preserve precision
-                prune = 0.0     # Don't prune active parameters
-                reason = "High gradient SNR; critical learning pathway."
-                
-            # 2. Dying or Dead Layers (Zero activations, stagnation)
-            elif last_entry.dead_ratio > 0.5 or health < 30:
-                quant = "INT4"  # Highest quantization
-                prune = 0.8     # Aggressive structural pruning
-                reason = "Severe stagnation or dead neurons detected."
-                
-            # 3. Dense but Low-Variance Layers (Feed-forward blocks, highly stable)
+            if not is_prunable:
+                quant = "FP16" if ("Norm" in module_type or "Embedding" in module_type) else "INT8"
+                prune = 0.0
+                reason = "Preserved (Normalization, Embedding, or Head)"
             else:
-                quant = "INT8"  # Standard quantization
-                prune = target_sparsity
-                reason = "Stable, low-variance feed-forward representation."
+                saliency = activity_scores[layer_name]
+                factor = (mean_saliency - saliency) / mean_saliency  # [-1, 1] roughly
+                prune = target_sparsity * (1.0 + factor * 0.8)
+                prune = max(0.00, min(0.95, prune))  # Keep within safe bounds
                 
-            # Determine correct pruning strategy based on layer type
-            prune_type = "unstructured_l1"
+                if factor < -0.3:
+                    quant = "FP16"
+                    reason = "High saliency/health; critical learning pathway."
+                elif factor > 0.3:
+                    quant = "INT4"
+                    reason = "Low saliency/health; stagnation or dead neurons."
+                else:
+                    quant = "INT8"
+                    reason = "Average saliency feed-forward representation."
+                
+            prune_type = "none"
             if prune > 0:
                 if "Conv" in module_type:
                     prune_type = "structured_channel"
-                elif "Embedding" in module_type:
-                    prune_type = "unstructured_l1"
                 elif "Linear" in module_type:
-                    if prune >= 0.5:
-                        prune_type = "nvidia_2:4_structured"
-                    else:
-                        prune_type = "unstructured_l1"
+                    prune_type = "unstructured_l1"
 
             # Compute theoretical estimators
             baseline_bytes = numel * 4  # Assume starting at FP32
@@ -123,8 +145,8 @@ class RecipeGenerator:
                 "layer_type": module_type,
                 "shape": shape,
                 "quantization": quant,
-                "prune_ratio": round(prune, 2),
-                "prune_type": prune_type if prune > 0 else "none",
+                "prune_ratio": round(prune, 3),
+                "prune_type": prune_type,
                 "reason": reason,
                 "health_score": round(health, 1),
                 "dead_ratio": round(last_entry.dead_ratio, 2)
