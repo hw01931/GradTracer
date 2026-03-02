@@ -28,7 +28,7 @@ Usage (AI Agent Mode):
     print(xml)  # AI reads this and auto-applies fixes
 """
 
-__version__ = "0.7.2"
+__version__ = "0.7.6"
 
 from gradtracer.tracker import FlowTracker
 from gradtracer.analyzers.boosting import BoostingTracker
@@ -42,7 +42,6 @@ from gradtracer.analyzers.peft import PEFTTracker
 from gradtracer.analyzers.embedding import EmbeddingTracker
 from gradtracer.analyzers.manager import FlowManager
 from gradtracer.analyzers.tree_dynamics import TreeDynamicsTracker
-from gradtracer.analyzers.recipes import RecipeGenerator
 from gradtracer.agent import AgentExporter
 from gradtracer.history import HistoryTracker
 from gradtracer.audit import AutoFixAuditLogger
