@@ -24,11 +24,11 @@ Usage (Compression):
     result = tracker.auto_compress(performance_floor=0.95)
 
 Usage (AI Agent Mode):
-    xml = tracker.export_for_agent()
-    print(xml)  # AI reads this and auto-applies fixes
+    json = tracker.export_for_agent()
+    print(json)  # AI reads this and auto-applies fixes
 """
 
-__version__ = "0.7.7"
+__version__ = "0.7.8"
 
 from gradtracer.tracker import FlowTracker
 from gradtracer.analyzers.boosting import BoostingTracker
@@ -106,7 +106,6 @@ __all__ = [
     "EmbeddingTracker",
     "FlowManager",
     "TreeDynamicsTracker",
-    "RecipeGenerator",
     "AgentExporter",
     "HistoryTracker",
     "AutoFixAuditLogger",

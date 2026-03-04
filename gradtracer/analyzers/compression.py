@@ -130,9 +130,17 @@ class CompressionTracker:
         nonzero = 0
         size_bytes = 0
         for p in model.parameters():
-            total += p.numel()
-            nonzero += (p != 0).sum().item()
-            size_bytes += p.nelement() * p.element_size()
+            numel = p.numel()
+            total += numel
+            
+            # Fast check for qint8
+            if p.dtype == torch.qint8 or p.dtype == torch.quint8:
+                nonzero += numel
+                size_bytes += numel * 1
+            else:
+                nonzero += (p != 0).sum().item()
+                size_bytes += numel * p.element_size()
+                
         return total, nonzero, size_bytes / (1024 * 1024)
 
     def _measure_layer_stats(self, model) -> Dict[str, LayerCompressionStats]:
@@ -145,14 +153,24 @@ class CompressionTracker:
                 if hasattr(module, "weight"):
                     w = module.weight.detach()
                     total = w.numel()
-                    nz = (w != 0).sum().item()
-                    stats[name] = LayerCompressionStats(
-                        name=name,
-                        total_params=total,
-                        nonzero_params=nz,
-                        sparsity=1.0 - (nz / max(total, 1)),
-                        weight_norm=w.norm().item(),
-                    )
+                    
+                    if w.dtype == torch.qint8 or w.dtype == torch.quint8:
+                        stats[name] = LayerCompressionStats(
+                            name=name,
+                            total_params=total,
+                            nonzero_params=total,
+                            sparsity=0.0,
+                            weight_norm=0.0,
+                        )
+                    else:
+                        nz = (w != 0).sum().item()
+                        stats[name] = LayerCompressionStats(
+                            name=name,
+                            total_params=total,
+                            nonzero_params=nz,
+                            sparsity=1.0 - (nz / max(total, 1)),
+                            weight_norm=w.norm().item(),
+                        )
         return stats
 
     def _evaluate(self, model) -> float:
@@ -194,6 +212,59 @@ class CompressionTracker:
                 prune.remove(module, param_name)
             except ValueError:
                 pass
+
+    @staticmethod
+    def _apply_dynamic_quantization(model):
+        """Apply blanket PyTorch Dynamic INT8 Quantization to all Linear layers (Naive baseline)."""
+        torch = _get_torch()
+        import torch.nn as nn
+        return torch.quantization.quantize_dynamic(
+            model,
+            {nn.Linear},
+            dtype=torch.qint8
+        )
+
+    @staticmethod
+    def apply_mixed_precision_quantization(model, recommendation: Dict[str, int]):
+        """
+        Apply TRUE PyTorch Native Mixed-Precision Dynamic Quantization.
+        Uses QuantizationAdvisor's bit recommendations.
+        - Robust layers (recommending <= 8 bits) are quantized to qint8.
+        - Sensitive layers (recommending 16/32 bits) are exempt and kept in FP32.
+        
+        Args:
+            model: PyTorch model.
+            recommendation: Dict output from `QuantizationAdvisor.recommend_mixed_precision()`.
+        """
+        torch = _get_torch()
+        import torch.nn as nn
+        
+        # Start by targeting all Linears
+        qconfig_spec = {nn.Linear: torch.quantization.default_dynamic_qconfig}
+        
+        kept_fp32 = 0
+        quantized_int8 = 0
+        
+        for param_name, bits in recommendation.items():
+            # Strip '.weight' from tracked param name to get the module name
+            mod_name = param_name[:-7] if param_name.endswith(".weight") else param_name
+            
+            if bits > 8:
+                # Explicitly disable quantization for this sensitive module
+                qconfig_spec[mod_name] = None
+                kept_fp32 += 1
+            else:
+                quantized_int8 += 1
+                
+        print(f"  [GradTracer] Mixed-Precision: Automatically routing {quantized_int8} robust layers to lower precision, keeping {kept_fp32} sensitive layers at FP32.")
+        
+        # Apply selective quantization
+        model_q = torch.quantization.quantize_dynamic(
+            model,
+            qconfig_spec=qconfig_spec,
+            dtype=torch.qint8
+        )
+        return model_q
 
     @staticmethod
     def _apply_layer_pruning(model, layer_name: str, sparsity: float):
@@ -264,10 +335,10 @@ class CompressionTracker:
         Automatically find the optimal compression level.
 
         Args:
-            method: 'pruning' or 'lora'.
+            method: 'pruning', 'quantization', or 'lora'.
             performance_floor: Minimum acceptable ratio of original performance (0-1).
-            search_range: (min, max) range to search.
-            search_strategy: 'binary' or 'grid'.
+            search_range: (min, max) range to search (ignored for quantization).
+            search_strategy: 'binary' or 'grid' (ignored for quantization).
             precision: Search stops when range < precision.
             fine_tune_fn: Optional callable(model) to fine-tune after compression.
 
@@ -288,7 +359,15 @@ class CompressionTracker:
 
         search_snapshots = [orig_snap]
 
-        if search_strategy == "binary":
+        if method == "quantization":
+            model_copy = copy.deepcopy(model_backup)
+            quantized = self._apply_dynamic_quantization(model_copy)
+            if fine_tune_fn is not None:
+                fine_tune_fn(quantized)
+            self.model = quantized
+            snap = self.snapshot("quant_int8", bits=8, method="quantization")
+            search_snapshots.append(snap)
+        elif search_strategy == "binary":
             result = self._binary_search(
                 model_backup, method, target_score, baseline_score,
                 search_range, precision, fine_tune_fn, search_snapshots
@@ -304,7 +383,7 @@ class CompressionTracker:
 
         optimal_snap = max(
             [s for s in search_snapshots if s.eval_metrics.get("score", 0) >= target_score],
-            key=lambda s: s.sparsity,
+            key=lambda s: 1 - s.model_size_mb,  # Maximize size reduction
             default=search_snapshots[0],
         )
 
