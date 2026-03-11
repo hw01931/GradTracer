@@ -30,6 +30,19 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from gradtracer.analyzers.features import LayerProfile
+# Import modular execution strategies
+from gradtracer.analyzers.pruning import (
+    apply_global_pruning,
+    apply_heterogeneous_pruning,
+    PruningAdvisor
+)
+from gradtracer.analyzers.quantization import (
+    apply_uniform_quantization,
+    apply_mixed_precision_quantization,
+    QuantizationAdvisor
+)
+
 _torch = None
 
 
@@ -113,10 +126,24 @@ class CompressionTracker:
                  (higher = better). Example: lambda m: accuracy(m, X_val, y_val)
     """
 
-    def __init__(self, model, eval_fn: Optional[Callable] = None):
-        torch = _get_torch()
+    def __init__(
+        self,
+        model,
+        eval_fn: Optional[Callable] = None,
+        tracker: Optional[Any] = None,
+    ):
+        """
+        Initialize the compression tracker.
+
+        Args:
+            model: PyTorch model.
+            eval_fn: A callable `fn(model) -> float` yielding a performance score.
+                     Higher must be better (e.g. accuracy).
+            tracker: Optional `FlowTracker` instance. Required if using 'heterogeneous' method.
+        """
         self.model = model
         self.eval_fn = eval_fn
+        self.tracker = tracker
         self.snapshots: List[CompressionSnapshot] = []
         self._sensitivity_cache: Optional[Dict[str, List[Tuple[float, float]]]] = None
 
@@ -181,104 +208,10 @@ class CompressionTracker:
             )
         return float(self.eval_fn(model))
 
+    # ------------------------------------------------------------------    
+    # Pruning & Quantization Utilities have been moved to dedicated 
+    # modules: `gradtracer.analyzers.pruning` and `gradtracer.analyzers.quantization`
     # ------------------------------------------------------------------
-    # Pruning utilities
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _apply_pruning(model, sparsity: float, method: str = "l1"):
-        """Apply global unstructured pruning."""
-        torch = _get_torch()
-        import torch.nn as nn
-        import torch.nn.utils.prune as prune
-
-        params_to_prune = []
-        for name, module in model.named_modules():
-            if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)):
-                if hasattr(module, "weight"):
-                    params_to_prune.append((module, "weight"))
-
-        if not params_to_prune:
-            return
-
-        prune.global_unstructured(
-            params_to_prune,
-            pruning_method=prune.L1Unstructured,
-            amount=sparsity,
-        )
-
-        # Make pruning permanent
-        for module, param_name in params_to_prune:
-            try:
-                prune.remove(module, param_name)
-            except ValueError:
-                pass
-
-    @staticmethod
-    def _apply_dynamic_quantization(model):
-        """Apply blanket PyTorch Dynamic INT8 Quantization to all Linear layers (Naive baseline)."""
-        torch = _get_torch()
-        import torch.nn as nn
-        return torch.quantization.quantize_dynamic(
-            model,
-            {nn.Linear},
-            dtype=torch.qint8
-        )
-
-    @staticmethod
-    def apply_mixed_precision_quantization(model, recommendation: Dict[str, int]):
-        """
-        Apply TRUE PyTorch Native Mixed-Precision Dynamic Quantization.
-        Uses QuantizationAdvisor's bit recommendations.
-        - Robust layers (recommending <= 8 bits) are quantized to qint8.
-        - Sensitive layers (recommending 16/32 bits) are exempt and kept in FP32.
-        
-        Args:
-            model: PyTorch model.
-            recommendation: Dict output from `QuantizationAdvisor.recommend_mixed_precision()`.
-        """
-        torch = _get_torch()
-        import torch.nn as nn
-        
-        # Start by targeting all Linears
-        qconfig_spec = {nn.Linear: torch.quantization.default_dynamic_qconfig}
-        
-        kept_fp32 = 0
-        quantized_int8 = 0
-        
-        for param_name, bits in recommendation.items():
-            # Strip '.weight' from tracked param name to get the module name
-            mod_name = param_name[:-7] if param_name.endswith(".weight") else param_name
-            
-            if bits > 8:
-                # Explicitly disable quantization for this sensitive module
-                qconfig_spec[mod_name] = None
-                kept_fp32 += 1
-            else:
-                quantized_int8 += 1
-                
-        print(f"  [GradTracer] Mixed-Precision: Automatically routing {quantized_int8} robust layers to lower precision, keeping {kept_fp32} sensitive layers at FP32.")
-        
-        # Apply selective quantization
-        model_q = torch.quantization.quantize_dynamic(
-            model,
-            qconfig_spec=qconfig_spec,
-            dtype=torch.qint8
-        )
-        return model_q
-
-    @staticmethod
-    def _apply_layer_pruning(model, layer_name: str, sparsity: float):
-        """Apply pruning to a single layer."""
-        torch = _get_torch()
-        import torch.nn as nn
-        import torch.nn.utils.prune as prune
-
-        for name, module in model.named_modules():
-            if name == layer_name and isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d)):
-                if hasattr(module, "weight"):
-                    prune.l1_unstructured(module, name="weight", amount=sparsity)
-                    prune.remove(module, "weight")
-                    return
 
     # ------------------------------------------------------------------
     # Snapshot
@@ -335,7 +268,7 @@ class CompressionTracker:
         Automatically find the optimal compression level.
 
         Args:
-            method: 'pruning', 'quantization', or 'lora'.
+            method: 'pruning', 'quantization', 'heterogeneous', or 'lora'.
             performance_floor: Minimum acceptable ratio of original performance (0-1).
             search_range: (min, max) range to search (ignored for quantization).
             search_strategy: 'binary' or 'grid' (ignored for quantization).
@@ -360,13 +293,47 @@ class CompressionTracker:
         search_snapshots = [orig_snap]
 
         if method == "quantization":
+            # Quantization is discrete, no search range needed for dynamic INT8
             model_copy = copy.deepcopy(model_backup)
-            quantized = self._apply_dynamic_quantization(model_copy)
+            quantized_model = apply_uniform_quantization(model_copy)
             if fine_tune_fn is not None:
-                fine_tune_fn(quantized)
-            self.model = quantized
+                fine_tune_fn(quantized_model)
+            self.model = quantized_model
             snap = self.snapshot("quant_int8", bits=8, method="quantization")
             search_snapshots.append(snap)
+        elif method == "heterogeneous":
+            if self.tracker is None:
+                raise ValueError("FlowTracker must be provided to CompressionTracker to use 'heterogeneous' method.")
+            
+            # Step 1: Find best target sparsity using heterogeneous pruning
+            self._binary_search(model_backup, "heterogeneous_prune", target_score, baseline_score, search_range, precision, fine_tune_fn, search_snapshots)
+            
+            # Step 2: Grab the optimal pruned model from search
+            optimal_prune = max(
+                [s for s in search_snapshots if s.eval_metrics.get("score", 0) >= target_score],
+                key=lambda s: 1 - s.model_size_mb,
+                default=search_snapshots[0]
+            )
+            
+            target_sp = optimal_prune.config.get("sparsity", 0.0)
+            
+            # Step 3: Rebuild hybrid from scratch
+            model_copy = copy.deepcopy(model_backup)
+            p_advisor = PruningAdvisor(self.tracker)
+            p_plan = p_advisor.generate_pruning_plan(target_sp)
+            pruned_model = apply_heterogeneous_pruning(model_copy, p_plan)
+            
+            q_advisor = QuantizationAdvisor(self.tracker)
+            q_plan = q_advisor.recommend_mixed_precision()
+            hybrid_model = apply_mixed_precision_quantization(pruned_model, q_plan)
+            
+            if fine_tune_fn is not None:
+                fine_tune_fn(hybrid_model)
+                
+            self.model = hybrid_model
+            snap = self.snapshot(f"heterogeneous_{target_sp:.2f}", method="heterogeneous", sparsity=round(target_sp, 3))
+            search_snapshots.append(snap)
+            
         elif search_strategy == "binary":
             result = self._binary_search(
                 model_backup, method, target_score, baseline_score,
@@ -418,8 +385,13 @@ class CompressionTracker:
             model_copy = copy.deepcopy(model_backup)
 
             if method == "pruning":
-                self._apply_pruning(model_copy, mid)
+                apply_global_pruning(model_copy, mid)
                 config = {"sparsity": round(mid, 3), "method": "pruning"}
+            elif method == "heterogeneous_prune":
+                p_advisor = PruningAdvisor(self.tracker)
+                p_plan = p_advisor.generate_pruning_plan(mid)
+                apply_heterogeneous_pruning(model_copy, p_plan)
+                config = {"sparsity": round(mid, 3), "method": "heterogeneous_prune"}
             elif method == "lora":
                 config = {"rank": int(mid), "method": "lora"}
             else:
@@ -455,8 +427,13 @@ class CompressionTracker:
             model_copy = copy.deepcopy(model_backup)
 
             if method == "pruning":
-                self._apply_pruning(model_copy, level)
+                apply_global_pruning(model_copy, level)
                 config = {"sparsity": round(float(level), 3), "method": "pruning"}
+            elif method == "heterogeneous_prune":
+                p_advisor = PruningAdvisor(self.tracker)
+                p_plan = p_advisor.generate_pruning_plan(level)
+                apply_heterogeneous_pruning(model_copy, p_plan)
+                config = {"sparsity": round(float(level), 3), "method": "heterogeneous_prune"}
             else:
                 config = {"rank": int(level), "method": method}
 

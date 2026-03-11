@@ -84,22 +84,23 @@ class QuantizationAdvisor:
     def _recommend_bits(w_range: float, w_std: float, snr: float) -> int:
         """
         Decision logic for bit-width recommendation.
-
-        Logic:
-            sensitivity = normalize(snr * w_range * w_std)
-            High sensitivity → 16 or 32-bit
-            Medium → 8-bit
-            Low → 4-bit
+        Improved to protect sensitive layers more aggressively.
         """
-        # Composite sensitivity score
-        sensitivity = snr * max(w_range, 1e-6) * max(w_std, 1e-6)
+        # Improved sensitivity score (weighted more towards gradient signal)
+        # We use log-scale SNR to make it less prone to extreme vanishing values
+        weighted_snr = np.log1p(snr)
+        
+        # Combined score: Signal * Variation
+        # If the layer is changing fast (SNR) or has wide weights (Std), it's sensitive.
+        sensitivity = weighted_snr * (w_range + w_std * 2.0)
 
-        if sensitivity > 1.0:
-            return 16  # Very sensitive, keep high precision
-        elif sensitivity > 0.01:
-            return 8   # Standard quantization
-        else:
-            return 4   # Safe to quantize aggressively
+        # New, stricter thresholds
+        if sensitivity > 0.1:      # Clearly important signal
+            return 16  # Keep FP32 (Recommended for sensitive layers)
+        elif sensitivity > 0.001:  # Moderate signal
+            return 8   # Standard Quantization
+        else:                      # Near-zero signal/dead weights
+            return 4   # Highly Aggressive Quantization
 
     def recommend_mixed_precision(self) -> Dict[str, int]:
         """
@@ -190,3 +191,47 @@ class QuantizationAdvisor:
             + "\n".join(layers_xml) + "\n"
             + "</quantization_analysis>"
         )
+
+# ------------------------------------------------------------------
+# Quantization Execution Methods
+# ------------------------------------------------------------------
+
+def apply_uniform_quantization(model: 'torch.nn.Module') -> 'torch.nn.Module':
+    """Apply wholesale uniform PyTorch Dynamic INT8 Quantization."""
+    import torch
+    import torch.nn as nn
+    return torch.quantization.quantize_dynamic(
+        model, {nn.Linear}, dtype=torch.qint8
+    )
+
+def apply_mixed_precision_quantization(model: 'torch.nn.Module', recommendation: Dict[str, int]) -> 'torch.nn.Module':
+    """
+    Apply TRUE Heterogeneous PyTorch Native Mixed-Precision Dynamic Quantization.
+    Robust layers (recommending <= 8 bits) are quantized to qint8.
+    Sensitive layers (recommending 16/32 bits) are kept exact in FP32.
+    """
+    import torch
+    import torch.nn as nn
+    
+    # Target all Linears by default
+    qconfig_spec = {nn.Linear: torch.quantization.default_dynamic_qconfig}
+    
+    kept_fp32 = 0
+    quantized_int8 = 0
+    
+    for param_name, bits in recommendation.items():
+        # Strip '.weight' to map param to module name
+        mod_name = param_name[:-7] if param_name.endswith(".weight") else param_name
+        
+        if bits > 8:
+            # Disable quantization for this sensitive module
+            qconfig_spec[mod_name] = None
+            kept_fp32 += 1
+        else:
+            quantized_int8 += 1
+            
+    print(f"  [Quantization Executor] Routing {quantized_int8} layers to INT8, leaving {kept_fp32} layers in FP32.")
+    
+    return torch.quantization.quantize_dynamic(
+        model, qconfig_spec=qconfig_spec, dtype=torch.qint8
+    )
