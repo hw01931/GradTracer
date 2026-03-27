@@ -97,3 +97,93 @@ def plot_embedding_diagnostics(tracker, top_k: int = 20, save_path: Optional[str
         print(f"📊 Saved visualization to {save_path}")
     else:
         plt.show()
+
+class DLPlotAPI:
+    """Provides human-readable visualization for deep learning training dynamics."""
+    
+    def __init__(self, store):
+        self.store = store
+
+    def mechanistic(self, save_path: Optional[str] = None):
+        """
+        Generates a beautiful 1x3 XAI Dashboard displaying:
+        1. Grokking Progress (Memorization vs Circuit Formation)
+        2. Gradient Starvation (Shortcut Learning Flow)
+        3. Model Epistemic Uncertainty
+        """
+        # We need the InterpretationAdvisor, but we only have store.
+        # We can construct a dummy tracker or just pass a mock.
+        from gradtracer.analyzers.interpretation import InterpretationAdvisor
+        class MockTracker:
+            def __init__(self, s): self.store = s
+        
+        advisor = InterpretationAdvisor(MockTracker(self.store))
+        
+        grokking = advisor.grokking_progress()
+        shortcuts = advisor.detect_shortcut_learning()
+        uncertainty = advisor.epistemic_uncertainty_profile()
+        
+        sns.set_theme(style="darkgrid", palette="pastel")
+        fig, axes = plt.subplots(1, 3, figsize=(20, 6))
+        
+        # 1. Grokking Progress Bar Chart
+        layers = list(grokking.keys())
+        prog_scores = [grokking[l]["progress_score"] for l in layers]
+        phases = [grokking[l]["phase"] for l in layers]
+        
+        colors = []
+        for p in phases:
+            if p == "memorization": colors.append("#ff9999") # Red
+            elif p == "circuit_formation": colors.append("#99ff99") # Green
+            else: colors.append("#99ccff") # Blue
+            
+        axes[0].barh(layers, prog_scores, color=colors, edgecolor='black', linewidth=0.5)
+        axes[0].set_title("1. Grokking & Circuit Formation", fontsize=14, fontweight="bold")
+        axes[0].set_xlabel("Formation Progress (0 -> 1)")
+        axes[0].set_xlim(0, 1.1)
+        axes[0].invert_yaxis()
+        
+        # 2. Epistemic Uncertainty
+        uncert_scores = [uncertainty.get(l, 0.0) for l in layers]
+        sns.heatmap(np.array(uncert_scores).reshape(-1, 1), annot=True, cmap="YlOrRd", 
+                    yticklabels=layers, xticklabels=["Uncertainty"], ax=axes[1], cbar=False)
+        axes[1].set_title("2. Epistemic Uncertainty Profile", fontsize=14, fontweight="bold")
+        
+        # 3. Gradient Flow (Starvation)
+        num_steps = len(self.store.get_layer_series(layers[0], "grad_norm"))
+        if num_steps > 0:
+            total_flow = np.zeros(num_steps)
+            for name in layers:
+                total_flow += np.array(self.store.get_layer_series(name, "grad_norm"))
+            total_flow += 1e-12
+            
+            for name in layers:
+                rel_flow = np.array(self.store.get_layer_series(name, "grad_norm")) / total_flow
+                
+                # Highlight dominant/starved
+                lw, alpha = 2.0, 0.7
+                if name in shortcuts["dominant_circuits"]:
+                    lw, alpha = 4.0, 1.0
+                elif name in shortcuts["starved_circuits"]:
+                    alpha = 0.3
+                    
+                axes[2].plot(rel_flow, label=name if lw == 4.0 else None, linewidth=lw, alpha=alpha)
+                
+            axes[2].set_title("3. Gradient Flow & Starvation", fontsize=14, fontweight="bold")
+            axes[2].set_xlabel("Training Step")
+            axes[2].set_ylabel("Relative Flow Share")
+            if len(shortcuts["dominant_circuits"]) > 0:
+                axes[2].legend(title="Dominant Shortcut")
+                
+        plt.tight_layout()
+        
+        # Add interpretation text
+        caption = "🔧 DYNAMICS XAI >> Green=Grokking, Red=Memorization | High Uncertainty=Model is Guessing | Starvation=Shortcut taking over"
+        plt.figtext(0.5, -0.05, caption, wrap=True, horizontalalignment='center', fontsize=12,
+                    bbox={"facecolor":"#333333", "alpha":0.9, "pad":10, "boxstyle":"round,pad=0.5"}, color="white")
+        
+        if save_path:
+            plt.savefig(save_path, bbox_inches="tight", dpi=150)
+            print(f"📊 Mechanistic XAI Dashboard saved to {save_path}")
+        else:
+            plt.show()

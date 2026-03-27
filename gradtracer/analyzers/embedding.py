@@ -7,7 +7,7 @@ to diagnose representation collapse, cold-start failures, and embedding drift.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Any
 import warnings
 
 import numpy as np
@@ -75,7 +75,6 @@ class EmbeddingTracker:
         torch = _get_torch()
         
         # 1. Capture active indices for step() logging
-        # Only pull to CPU if we are logging this interval to save D2H overhead
         if self.steps % self.track_interval == 0:
             with torch.no_grad():
                 if grad.is_sparse:
@@ -85,18 +84,14 @@ class EmbeddingTracker:
                     indices = torch.nonzero(norms > 1e-8, as_tuple=True)[0].cpu().numpy()
                 self._active_indices = indices
 
-        # 2. ⚡ AutoFix: Intercept and scale oscillating gradients in-place in GPU
+        # 2. AutoFix: Intercept and scale oscillating gradients
         if self.auto_fix and self._zombie_mask_tensor is not None:
-            # _zombie_mask_tensor is constructed at the end of step(), shape (num_embeddings, 1)
-            # It contains scaling factors (e.g. 0.1 for zombies, 1.0 for healthy)
             with torch.no_grad():
                 if grad.is_sparse:
-                    # Sparse scaling
                     indices = grad._indices()[0]
                     scales = self._zombie_mask_tensor[indices].to(grad._values().device)
                     grad._values().mul_(scales)
                 else:
-                    # Dense scaling
                     grad.mul_(self._zombie_mask_tensor.to(grad.device))
         
         return grad
@@ -105,7 +100,6 @@ class EmbeddingTracker:
         """Call this after optimizer.step()"""
         torch = _get_torch()
         
-        # Skip heavy NumPy logic if it's not the interval
         if self.steps % self.track_interval != 0:
             self.steps += 1
             return
@@ -131,25 +125,18 @@ class EmbeddingTracker:
                 import torch.distributed as dist
                 if dist.is_available() and dist.is_initialized():
                     device = self.layer.weight.device
-                    # We send arrays to GPU for fast NCCL reduce
                     freq_t = torch.tensor(local_freq, dtype=torch.int32, device=device)
                     norm_t = torch.tensor(local_norms, dtype=torch.float32, device=device)
                     
                     dist.all_reduce(freq_t, op=dist.ReduceOp.SUM)
                     dist.all_reduce(norm_t, op=dist.ReduceOp.SUM)
                     
-                    # Bring back consolidated stats
                     global_freq = freq_t.cpu().numpy()
                     global_norms = norm_t.cpu().numpy()
-                    
-                    # In DDP, many embeddings might have been updated globally
                     global_idx_mask = global_freq > 0
                     idx = np.where(global_idx_mask)[0]
-                    
-                    # For metrics, we average the norms across GPUs that saw the item
                     active_counts = global_freq[idx]
                     norms = global_norms[idx] / active_counts
-                    
                     self.freqs[idx] += active_counts
                 else:
                     self.freqs[idx] += 1
@@ -159,9 +146,8 @@ class EmbeddingTracker:
                 self.velocities[idx] = 0.9 * self.velocities[idx] + 0.1 * norms
                 
                 # Calculate oscillation (cosine similarity with prev delta)
-                normalized_deltas = deltas / norms[:, None]
+                normalized_deltas = deltas / (norms[:, None] + 1e-8)
                 prev_normalized = self._prev_deltas[idx]
-                
                 cos_sims = np.sum(normalized_deltas * prev_normalized, axis=1)
                 
                 valid_mask = np.linalg.norm(prev_normalized, axis=1) > 0
@@ -171,28 +157,17 @@ class EmbeddingTracker:
                          0.8 * self.oscillation_scores[valid_idx] + 0.2 * cos_sims[valid_mask]
                      )
                 
-                # Save normalized direction for next time
                 self._prev_deltas[idx] = normalized_deltas
                 
                 # ── Auto-Fix Construction ──
-                # Use a Bayesian-inspired empirical weighting. Instead of blindly slicing zombies,
-                # we only penalize if they oscillate aggressively (cos_sim < -0.3) AND have seen decent frequency
                 if self.auto_fix:
                     scales = np.ones(self.num_embeddings, dtype=np.float32)
-                    
-                    # Zombie penalty (Oscillation)
-                    # For embeddings heavily zig-zagging, their variance isn't helping loss,
-                    # so we scale down their gradients to act as local LR decay.
-                    # We use self.zombie_embeddings() which includes the momentum safety threshold.
                     zombies = self.zombie_embeddings()
                     if len(zombies) > 0:
                         scales[zombies] = 0.1
                         if self.audit_logger:
                             self.audit_logger.log_intervention(self.steps, self.name, "zombie_penalty", zombies, 0.1)
                         
-                    # Dead revival (Inject minor exploration momentum if never updated)
-                    # In a real setup, we might add uniform noise to their gradients, 
-                    # but scaling them up aggressively when they do get hit prevents vanishing.
                     revivals = np.where(self.freqs == 0)[0]
                     if len(revivals) > 0:
                         scales[revivals] = 1.5
@@ -209,62 +184,55 @@ class EmbeddingTracker:
         return np.where(self.freqs == 0)[0].tolist()
         
     def zombie_embeddings(self, threshold: float = -0.3) -> List[int]:
-        """
-        Returns indices of embeddings oscillating back and forth.
-        Usually indicates learning rate is too high or conflicting gradients for this item.
-        Safe-guarded against numerical noise in converged embeddings via a velocity threshold.
-        """
-        # 🛡️ Momentum Defense: Protect early-converged embeddings from numerical noise.
-        # If an embedding's velocity is below 50% of the median active velocity, 
-        # it has already converged and its micro-vibrations are just noise.
-        if np.max(self.velocities) > 0:
-            active_vels = self.velocities[self.freqs > 0]
-            velocity_threshold = np.median(active_vels) * 0.5 if len(active_vels) > 0 else 0.0
-        else:
-            velocity_threshold = 0.0
-            
-        # Must have been updated at least a few times, be oscillating, AND have high enough momentum
+        active_vels = self.velocities[self.freqs > 0] if np.any(self.freqs > 0) else []
+        velocity_threshold = np.median(active_vels) * 0.5 if len(active_vels) > 0 else 0.0
         mask = (self.freqs > 5) & (self.oscillation_scores < threshold) & (self.velocities > velocity_threshold)
         return np.where(mask)[0].tolist()
 
-    def frequency_aware_saliency(self) -> np.ndarray:
-        """
-        Velocity normalized by exposure frequency.
-        Identifies embeddings that move a lot relative to how rarely they are seen.
-        """
-        eps = 1.0
-        return self.velocities / (self.freqs + eps)
-        
+    def starvation_index(self) -> np.ndarray:
+        if np.max(self.velocities) == 0:
+            return np.zeros(self.num_embeddings, dtype=np.float32)
+        m = np.median(self.velocities[self.freqs > 0]) if np.any(self.freqs > 0) else 1e-8
+        scores = np.clip(1.0 - (self.velocities / (m + 1e-12)), 0, 1)
+        return scores * (self.freqs > 0).astype(float)
+
+    def effective_rank(self, max_samples: int = 2000) -> float:
+        torch = _get_torch()
+        num = min(self.num_embeddings, max_samples)
+        with torch.no_grad():
+            if num < self.num_embeddings:
+                indices = torch.randperm(self.num_embeddings)[:num]
+                W = self.layer.weight[indices].detach().float().cpu().numpy()
+            else:
+                W = self.layer.weight.detach().float().cpu().numpy()
+            try:
+                s = np.linalg.svd(W, compute_uv=False)
+                s = s[s > 1e-10]
+                if len(s) == 0: return 1.0
+                p = s / s.sum()
+                entropy = -np.sum(p * np.log(p + 1e-12))
+                return math.exp(entropy)
+            except Exception:
+                return 1.0
+
     def popularity_bias(self) -> Dict[str, float]:
-        """
-        Compute Gini coefficient and entropy of the exposure distribution.
-        """
         f = self.freqs[self.freqs > 0]
         if len(f) == 0:
             return {"gini": 0.0, "entropy": 0.0, "coverage": 0.0}
-            
         f_norm = f / f.sum()
         entropy = -np.sum(f_norm * np.log(f_norm + 1e-8))
-        
-        # Gini
         f_sorted = np.sort(f)
         n = len(f)
         cumx = np.cumsum(f_sorted, dtype=float)
         gini = (n + 1 - 2 * np.sum(cumx) / cumx[-1]) / n
-        
         coverage = len(f) / self.num_embeddings
-        
-        return {
-            "gini": float(gini),
-            "entropy": float(entropy),
-            "coverage": float(coverage)
-        }
+        return {"gini": float(gini), "entropy": float(entropy), "coverage": float(coverage)}
         
     def summary(self) -> Dict[str, Any]:
         dead = self.dead_embeddings()
         zombies = self.zombie_embeddings()
         bias = self.popularity_bias()
-        
+        eff_rank = self.effective_rank()
         return {
             "num_embeddings": int(self.num_embeddings),
             "dead_count": int(len(dead)),
@@ -272,46 +240,46 @@ class EmbeddingTracker:
             "zombie_count": int(len(zombies)),
             "zombie_pct": float(len(zombies) / self.num_embeddings * 100),
             "coverage_pct": float(bias["coverage"] * 100),
-            "gini": float(bias["gini"])
+            "gini": float(bias["gini"]),
+            "effective_rank": float(eff_rank),
+            "rank_utilization": float(eff_rank / min(self.num_embeddings, self.embedding_dim) * 100)
         }
 
     def report(self) -> None:
         s = self.summary()
         lines = []
         lines.append("=" * 60)
-        lines.append(f"  GradTracer — Embedding Dynamics ('{self.name}')")
+        lines.append(f"  GradTracer - Embedding Dynamics ('{self.name}')")
         lines.append("=" * 60)
-        lines.append(f"📊 Matrix: {self.num_embeddings} x {self.embedding_dim}")
-        lines.append(f"🔍 Coverage (updated at least once): {s['coverage_pct']:.1f}%")
-        lines.append(f"📉 Dead items: {s['dead_count']} ({s['dead_pct']:.1f}%)")
-        lines.append(f"🧟 Zombie items (oscillating): {s['zombie_count']} ({s['zombie_pct']:.1f}%)")
-        lines.append(f"📈 Popularity Gini: {s['gini']:.3f} (1.0 = highly skewed)")
-        
+        lines.append(f"  Matrix: {self.num_embeddings} x {self.embedding_dim}")
+        lines.append(f"  Coverage (updated at least once): {s['coverage_pct']:.1f}%")
+        lines.append(f"  Dead items: {s['dead_count']} ({s['dead_pct']:.1f}%)")
+        lines.append(f"  Zombie items (oscillating): {s['zombie_count']} ({s['zombie_pct']:.1f}%)")
+        lines.append(f"  Popularity Gini: {s['gini']:.3f} (1.0 = highly skewed)")
+        lines.append(f"  Effective Rank: {s['effective_rank']:.1f} ({s['rank_utilization']:.1f}% utilization)")
         lines.append("")
-        lines.append("⚠️  Alerts & Prescriptions")
+        lines.append("  Alerts & Prescriptions")
         if s['dead_pct'] > 5.0:
-             lines.append(f"  💀 HIGH DEAD RATE ({s['dead_pct']:.1f}%)")
-             lines.append(f"     💊 Recommendation: Downsample negative items, or apply hashing trick.")
+             lines.append(f"  [!] HIGH DEAD RATE ({s['dead_pct']:.1f}%)")
+             lines.append(f"      Recommendation: Downsample negative items, or apply hashing trick.")
         if s['zombie_pct'] > 2.0:
-             lines.append(f"  🧟 ZOMBIE COLLAPSE ({s['zombie_pct']:.1f}%)")
-             lines.append(f"     💊 Recommendation: Reduce learning rate for sparse parameters (use SparseAdam), or increase batch size to smooth conflicting gradients.")
+             lines.append(f"  [!] ZOMBIE COLLAPSE ({s['zombie_pct']:.1f}%)")
+             lines.append(f"      Recommendation: Reduce learning rate for sparse parameters, or increase batch size.")
         if s['gini'] > 0.4:
-             lines.append(f"  🎯 EXTREME POPULARITY BIAS (Gini: {s['gini']:.2f})")
-             lines.append(f"     💊 Recommendation: Apply log-Q correction to logits, or use inverse/log-frequency sampling for positive items.")
-             
-        if not (s['dead_pct'] > 5.0 or s['zombie_pct'] > 2.0 or s['gini'] > 0.4):
-             lines.append("  ✅ Embedding dynamics are healthy.")
-             
+             lines.append(f"  [!] EXTREME POPULARITY BIAS (Gini: {s['gini']:.2f})")
+             lines.append(f"      Recommendation: Apply log-Q correction or inverse frequency sampling.")
+        if s['rank_utilization'] < 30.0:
+             lines.append(f"  [!] REPRESENTATION COLLAPSE (Rank Util: {s['rank_utilization']:.1f}%)")
+             lines.append(f"      Recommendation: Add 'orthogonality' penalty or reduce embedding dimension.")
+        if not (s['dead_pct'] > 5.0 or s['zombie_pct'] > 2.0 or s['gini'] > 0.4 or s['rank_utilization'] < 30.0):
+             lines.append("  [OK] Embedding dynamics are healthy.")
         if self.auto_fix and self.audit_logger:
              audit_summary = self.audit_logger.summary()
              if audit_summary.get("total_events", 0) > 0:
                  lines.append("")
-                 lines.append(f"  📝 Auto-Fix Audit: {audit_summary['total_events']} interventions logged to `.gradtracer/audit.jsonl`")
-        
+                 lines.append(f"  Audit: {audit_summary['total_events']} interventions logged to '.gradtracer/audit.jsonl'")
         lines.append("=" * 60)
-        rep = "\n".join(lines)
-        print(rep)
+        print("\n".join(lines))
         
     def detach(self):
-        if hasattr(self, '_hook'):
-            self._hook.remove()
+        if hasattr(self, '_hook'): self._hook.remove()

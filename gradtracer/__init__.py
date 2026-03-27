@@ -28,7 +28,7 @@ Usage (AI Agent Mode):
     print(json)  # AI reads this and auto-applies fixes
 """
 
-__version__ = "0.7.9"
+__version__ = "0.8.0"
 
 from gradtracer.tracker import FlowTracker
 from gradtracer.analyzers.boosting import BoostingTracker
@@ -41,7 +41,7 @@ from gradtracer.analyzers.distillation import DistillationTracker
 from gradtracer.analyzers.peft import PEFTTracker
 from gradtracer.analyzers.embedding import EmbeddingTracker
 from gradtracer.analyzers.manager import FlowManager
-from gradtracer.analyzers.tree_dynamics import TreeDynamicsTracker
+from gradtracer.analyzers.trees import TreeTracker
 from gradtracer.agent import AgentExporter
 from gradtracer.history import HistoryTracker
 from gradtracer.audit import AutoFixAuditLogger
@@ -88,7 +88,7 @@ def info():
     print(f"  DistillationTracker  Knowledge distillation")
     print(f"  PEFTTracker          LoRA / adapter optimization")
     print(f"  EmbeddingTracker     RecSys embedding dynamics")
-    print(f"  TreeDynamicsTracker  GBDT node-level tracking")
+    print(f"  TreeTracker          GBDT structural intelligence")
     print(f"  AgentExporter        AI-native XML output")
     print("=" * 45)
 
@@ -105,7 +105,7 @@ __all__ = [
     "PEFTTracker",
     "EmbeddingTracker",
     "FlowManager",
-    "TreeDynamicsTracker",
+    "TreeTracker",
     "AgentExporter",
     "HistoryTracker",
     "AutoFixAuditLogger",

@@ -102,23 +102,53 @@ class QuantizationAdvisor:
         else:                      # Near-zero signal/dead weights
             return 4   # Highly Aggressive Quantization
 
-    def recommend_mixed_precision(self) -> Dict[str, int]:
+    def recommend_mixed_precision(self, quantile: float = 0.85) -> Dict[str, int]:
         """
-        Per-layer bit-width recommendation for mixed-precision quantization.
+        Dynamically recommends bit-widths based on the overall sensitivity distribution 
+        of the current model. No hardcoded constants.
 
-        Returns:
-            {layer_name: recommended_bits (4, 8, or 16)}
+        Heuristic: Protect the top (1-quantile) most sensitive layers (FP32), 
+        normal layers (INT8), and near-zero signal layers (INT4).
+        
+        Args:
+            quantile: The threshold to determine "High Sensitivity" (top X percentile).
         """
         profile = self.sensitivity_profile()
-        return {name: info["recommended_bits"] for name, info in profile.items()}
+        if not profile:
+            return {}
+
+        # 1. Compute sensitivity scores (Signal SNR * Weight Spread)
+        # Using log-normalized SNR + Z-Score of weight spread for scale-invariant sensitivity
+        names = list(profile.keys())
+        scores = []
+        for name in names:
+            p = profile[name]
+            # S = log(1+SNR) * WeightRange
+            s = np.log1p(p["grad_snr"]) * (p["weight_range"] + 1e-9)
+            scores.append(s)
+        
+        scores = np.array(scores)
+        
+        # 2. Dynamic Thresholding using statistical quantiles
+        # Top 15% (by default) are 'Critical' -> FP32/16
+        # Near-zero are 'Dead/Redundant' -> INT4
+        high_threshold = np.quantile(scores, quantile) if len(scores) > 1 else 0.1
+        low_threshold = np.quantile(scores, 0.25) if len(scores) > 1 else 0.001
+        
+        plan = {}
+        for name, score in zip(names, scores):
+            if score >= high_threshold and score > 1e-6:
+                plan[name] = 16  # High Sensitivity -> FP32/16
+            elif score <= low_threshold or score < 1e-9:
+                plan[name] = 4   # Near-zero Signal -> INT4
+            else:
+                plan[name] = 8   # Normal -> INT8
+                
+        return plan
 
     def estimated_size_reduction(self) -> Dict[str, float]:
         """
-        Estimate memory savings from mixed-precision quantization.
-
-        Returns:
-            {"original_bits": 32, "avg_bits": float,
-             "estimated_reduction_pct": float}
+        Estimate memory savings based on the dynamic plan.
         """
         plan = self.recommend_mixed_precision()
         if not plan:

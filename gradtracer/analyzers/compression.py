@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from gradtracer.analyzers.features import LayerProfile
+
 # Import modular execution strategies
 from gradtracer.analyzers.pruning import (
     apply_global_pruning,
@@ -146,6 +146,37 @@ class CompressionTracker:
         self.tracker = tracker
         self.snapshots: List[CompressionSnapshot] = []
         self._sensitivity_cache: Optional[Dict[str, List[Tuple[float, float]]]] = None
+
+    def apply_joint_compression(self, target_sparsity: float = 0.5) -> 'torch.nn.Module':
+        """
+        Apply both Pruning AND Mixed-Precision Quantization in one go.
+        
+        Logic: 
+        1. Fisher-based Heterogeneous Pruning (removes redundant param parameters).
+        2. Mixed-Precision Quantization (compresses the bit-depth of remaining signal).
+        """
+        if not self.tracker:
+            raise ValueError("FlowTracker is required for joint compression analysis.")
+            
+        print(f"🛠️ Starting JOINT COMPRESSION (Goal: {target_sparsity*100}% Pruning + Mixed-Precision)")
+        
+        # Step A: Filtered Pruning (Targeting redundant weight parameters)
+        advisor_p = PruningAdvisor(self.tracker)
+        pruning_plan = advisor_p.generate_pruning_plan(target_sparsity=target_sparsity)
+        apply_heterogeneous_pruning(self.model, pruning_plan)
+        print("  [Step 1] Dynamic Heterogeneous Pruning Applied.")
+        
+        # Step B: Strategic Quantization (Protecting signal-critical layers)
+        advisor_q = QuantizationAdvisor(self.tracker)
+        # Stricter quantile (top 10% protection) for combined compression
+        quant_plan = advisor_q.recommend_mixed_precision(quantile=0.90)
+        
+        # PyTorch Dynamic Quantization requires CPU-side execution
+        self.model.to("cpu")
+        apply_mixed_precision_quantization(self.model, quant_plan)
+        print("  [Step 2] Mixed-Precision Quantization Applied.")
+        
+        return self.model
 
     # ------------------------------------------------------------------
     # Measurement utilities

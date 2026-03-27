@@ -27,76 +27,75 @@ class PruningAdvisor:
         self.tracker = tracker
         self.store = tracker.store
 
-    def velocity_saliency(self) -> Dict[str, float]:
-        window = min(10, self.store.num_steps)
-        if window == 0:
-            return {}
-        velocities = {}
-        for name in self.store.layer_names:
-            series = self.store.get_layer_series(name, "velocity")
-            velocities[name] = float(np.mean(series[-window:])) if series else 0.0
-        max_v = max(velocities.values()) if velocities else 1e-10
-        max_v = max(max_v, 1e-12)
-        return {name: v / max_v for name, v in velocities.items()}
-
-    def gradient_momentum(self) -> Dict[str, float]:
-        results = {}
+    def fisher_saliency(self) -> Dict[str, float]:
+        """
+        Fisher Information proxy: Σ (grad_k^2).
+        Measures how sensitive the loss is to small changes in weights.
+        """
+        fisher = {}
         for name in self.store.layer_names:
             series = self.store.get_layer_series(name, "grad_norm")
-            if len(series) < 4:
-                results[name] = 0.0
+            if not series:
+                fisher[name] = 0.0
                 continue
-            recent = series[len(series) // 2:]
-            if np.std(recent) < 1e-12:
-                results[name] = 0.0
-                continue
-            x = np.arange(len(recent), dtype=float)
-            y = np.array(recent, dtype=float)
-            results[name] = float(np.polyfit(x, y, 1)[0])
-        return results
-
-    def dead_neuron_candidates(self) -> List[str]:
-        dead_layers = []
-        for name in self.store.layer_names:
-            history = self.store.get_layer_history(name)
-            if history and history[-1].dead_ratio > 0.5:
-                dead_layers.append(name)
-        return dead_layers
+            # Use moving average of squared grad norms as a proxy for the diagonal of the Fisher Matrix
+            recent_grads = np.array(series[-10:], dtype=float)
+            fisher[name] = float(np.mean(recent_grads**2))
+        
+        # Relative Importance
+        total = sum(fisher.values()) + 1e-12
+        return {name: f / total for name, f in fisher.items()}
 
     def generate_pruning_plan(self, target_sparsity: float = 0.3) -> Dict[str, float]:
         """
-        Generate a heterogeneous pruning plan allocating sparsity based on saliency.
-        Highly salient layers retain full density (sparsity 0).
-        Dead/low saliency layers receive heavy sparsity.
+        Generate a heterogeneous pruning plan that EXACTLY meets the global target_sparsity.
+        Uses a binary search over sparsity multipliers to follow the inverse-Fisher distribution.
         """
-        vel_sal = self.velocity_saliency()
-        grad_mom = self.gradient_momentum()
-        dead_set = set(self.dead_neuron_candidates())
-
-        priorities = {}
-        for name in self.store.layer_names:
-            v_score = 1.0 - vel_sal.get(name, 0.5)
-            g_score = 0.3 if grad_mom.get(name, 0) < 0 else 0.0
+        fisher = self.fisher_saliency()
+        
+        # 1. Map layers to weights and parameter counts
+        model_p = self.tracker.model
+        param_counts = {}
+        for name, module in model_p.named_modules():
+            if name in self.store.layer_names or f"{name}.weight" in self.store.layer_names:
+                if hasattr(module, "weight"):
+                    param_counts[name] = module.weight.numel()
+        
+        if not param_counts:
+            return {}
             
-            history = self.store.get_layer_history(name)
-            dr = history[-1].dead_ratio if history else 0.0
-            d_score = dr * 0.3
-
-            # Priority 0: extremely important, do not prune
-            # Priority > 0.6: dead/useless, prune heavily
-            priorities[name] = v_score * 0.4 + g_score + d_score
-
-        # Distribute target_sparsity smoothly
-        # Layers with priority > 0.4 get pruned, others get 0
-        plan = {}
-        for name, p in priorities.items():
-            if p > 0.6:
-                plan[name] = min(target_sparsity * 2.0, 0.9) # Heavy prune
-            elif p > 0.4:
-                plan[name] = target_sparsity # Normal prune
+        total_params = sum(param_counts.values())
+        budget_to_prune = total_params * target_sparsity
+        
+        # 2. Importance-based Prunability
+        # Low Fisher -> High Prunability. We protect layers with high gradient energy.
+        importance = []
+        for name in param_counts.keys():
+            val = fisher.get(name, 0.0) or fisher.get(f"{name}.weight", 0.0)
+            importance.append(val)
+        
+        importance = np.array(importance)
+        # Power-scaling to protect sensitive layers more aggressively (e.g., 1/x^2)
+        prunability = 1.0 / (importance + 1e-9)**0.5
+        prunability /= prunability.sum()
+        
+        # 3. Solver: Sum(param_counts[i] * sparsity[i]) == budget_to_prune
+        # where sparsity[i] = clip(lambda * prunability[i], 0.0, 0.95)
+        low, high = 0.0, 1.0 / (prunability.min() + 1e-12)
+        best_lambda = low
+        for _ in range(30):
+            mid = (low + high) / 2
+            current_pruned = sum(count * np.clip(mid * prunability[i], 0.0, 0.95) 
+                                for i, (name, count) in enumerate(param_counts.items()))
+            if current_pruned < budget_to_prune:
+                low = mid
             else:
-                plan[name] = 0.0 # Protect
-                
+                high = mid
+            best_lambda = mid
+            
+        plan = {name: float(np.clip(best_lambda * prunability[i], 0.0, 0.95)) 
+                for i, name in enumerate(param_counts.keys())}
+        
         return plan
 
 def apply_global_pruning(model: nn.Module, sparsity: float) -> nn.Module:

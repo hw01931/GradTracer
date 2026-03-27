@@ -172,8 +172,8 @@ class AgentExporter:
         global_grad_norm = 0.0
         for name in store.layer_names:
             h = store.get_layer_history(name)
-            if h and h[-1].mean_grad_norm:
-                global_grad_norm += h[-1].mean_grad_norm ** 2
+            if h and h[-1].grad_norm:
+                global_grad_norm += h[-1].grad_norm ** 2
         global_grad_norm = round(global_grad_norm ** 0.5, 4)
 
         # ── 2. Causal Engine: Evaluate Rules ────────────────────────
@@ -264,12 +264,33 @@ class AgentExporter:
             })
             issue_summaries.append("DEAD_NEURONS")
 
+        # E. Mechanistic Interpretability (Phase 2 XAI)
+        from gradtracer.analyzers.interpretation import InterpretationAdvisor
+        advisor = InterpretationAdvisor(tracker)
+        
+        # Shortcut Detection
+        shortcuts = advisor.detect_shortcut_learning()
+        if shortcuts["shortcut_detected"]:
+            findings_json.append({
+                "type": "GRADIENT_STARVATION_SHORTCUT",
+                "premise": f"Dominant layers: {', '.join(shortcuts['dominant_circuits'][:2])}. Starved layers: {', '.join(shortcuts['starved_circuits'][:2])}.",
+                "implies": "The model has latched onto a spurious shallow shortcut feature, starving deeper semantic circuits.",
+                "action": "ADD_GRADIENT_STARVATION_PENALTY_OR_AUGMENT_DATA",
+                "expected_effect": "Force the model to rely on complex robust features instead of linear shortcuts.",
+                "confidence": 0.95
+            })
+            issue_summaries.append("SHORTCUT_LEARNING")
+            
+        # Grokking & Uncertainty Profile
+        grokking = advisor.grokking_progress()
+        uncertainty = advisor.epistemic_uncertainty_profile()
+
         # ── 3. Build Run Data for History ───────────────────────────
         health = layer_health_score(store)
         run_data = {
             "run_id": run_name,
             "optimizer": opt_info["str"],
-            "total_params": f"{arch['total_params']/1e6:.2f}M",
+            "total_params": f"{arch['total_params_raw']/1e6:.2f}M",
             "steps": store.num_steps,
             "final_loss": round(valid_losses[-1], 4) if valid_losses else None,
             "issues": issue_summaries,
@@ -345,7 +366,10 @@ class AgentExporter:
                 "layer": name,
                 "health": round(score, 0),
                 "status": status,
-                "flags": reason
+                "flags": reason,
+                "xai_grokking_phase": grokking.get(name, {}).get("phase", "unknown"),
+                "xai_grokking_progress": grokking.get(name, {}).get("progress_score", 0.0),
+                "xai_epistemic_uncertainty": uncertainty.get(name, 0.0)
             })
         report["gradtracer_agent_report"]["layer_health_summary"] = health_lines
 
