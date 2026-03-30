@@ -88,11 +88,14 @@ class EmbeddingTracker:
         if self.auto_fix and self._zombie_mask_tensor is not None:
             with torch.no_grad():
                 if grad.is_sparse:
+                    grad = grad.coalesce()
                     indices = grad._indices()[0]
                     scales = self._zombie_mask_tensor[indices].to(grad._values().device)
                     grad._values().mul_(scales)
                 else:
                     grad.mul_(self._zombie_mask_tensor.to(grad.device))
+        
+        return grad
         
         return grad
 
