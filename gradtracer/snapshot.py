@@ -49,7 +49,7 @@ class StepRecord:
 
 
 @dataclass
-class BoostingRoundRecord:
+class BoostingSnapshot:
     """Snapshot of a boosting model at one training round."""
 
     round: int
@@ -57,6 +57,9 @@ class BoostingRoundRecord:
     eval_metrics: Dict[str, Dict[str, float]] = field(default_factory=dict)
     # feature importance: {feature_name: importance}
     feature_importance: Dict[str, float] = field(default_factory=dict)
+
+# Alias for backward compatibility
+BoostingRoundRecord = BoostingSnapshot
 
 
 class SnapshotStore:
@@ -99,7 +102,7 @@ class BoostingStore:
     """Storage for boosting model training records."""
 
     def __init__(self):
-        self.rounds: List[BoostingRoundRecord] = []
+        self.rounds: List[BoostingSnapshot] = []
         self._feature_names: List[str] = []
         self._dataset_names: List[str] = []
         self._metric_names: List[str] = []
@@ -108,7 +111,7 @@ class BoostingStore:
     def num_rounds(self) -> int:
         return len(self.rounds)
 
-    def add_round(self, record: BoostingRoundRecord):
+    def add_round(self, record: BoostingSnapshot):
         if not self._feature_names and record.feature_importance:
             self._feature_names = list(record.feature_importance.keys())
         if not self._dataset_names and record.eval_metrics:

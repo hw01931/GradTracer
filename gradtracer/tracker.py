@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 import numpy as np
 
 from gradtracer.snapshot import LayerSnapshot, SnapshotStore, StepRecord
+from gradtracer.memory import MemoryTracker
+import time
 
 if TYPE_CHECKING:
     pass  # torch types only for type checking
@@ -67,6 +69,8 @@ class FlowTracker:
         scheduler=None,
         run_name: str = "current_run",
         track_interval: int = 1,
+        hook_interval: int = 1,
+        mode: str = "full",  # 'full' or 'light' (only tracks high-variance layers)
     ):
         torch = _get_torch()
 
@@ -79,7 +83,13 @@ class FlowTracker:
         self.scheduler = scheduler
         self.run_name = run_name
         self.track_interval = track_interval
+        self.hook_interval = hook_interval
+        self.mode = mode
         self.store = SnapshotStore()
+        self.memory = MemoryTracker()
+        self._start_time = None
+        self._overhead_ms = 0.0
+        self._total_steps_tracked = 0
 
         self._step_count = 0
         self._hooks = []
@@ -96,6 +106,18 @@ class FlowTracker:
             if param.requires_grad:
                 self._param_names.append(name)
                 self._params[name] = param
+
+        # Light mode: Only track the top 25% largest parameters (bottlenecks)
+        if self.mode == "light" and self._param_names:
+            sorted_params = sorted(
+                self._param_names, 
+                key=lambda n: self._params[n].numel(), 
+                reverse=True
+            )
+            num_to_keep = max(1, len(sorted_params) // 4)
+            self._param_names = sorted_params[:num_to_keep]
+            # Keep only selected params
+            self._params = {n: self._params[n] for n in self._param_names}
 
         # Register gradient hooks
         if self.track_gradients:
@@ -135,19 +157,37 @@ class FlowTracker:
 
             def _make_hook(pname):
                 def hook(grad):
-                    with torch.no_grad():
-                        g = grad.detach().float().cpu()
-                        self._grad_stats[pname] = {
-                            "norm": g.norm().item(),
-                            "mean": g.mean().item(),
-                            "std": g.std().item() if g.numel() > 1 else 0.0,
-                            "min": g.min().item(),
-                            "max": g.max().item(),
-                        }
+                    # We store the raw tensor on device to avoid backward-pass sync.
+                    # It will be processed and moved to CPU in step() only when needed.
+                    if self._step_count % self.hook_interval == 0:
+                        self._grad_stats[pname] = grad.detach()
                 return hook
 
             h = param.register_hook(_make_hook(name))
             self._hooks.append(h)
+
+    def get_estimated_resource_usage(self) -> Dict[str, Any]:
+        """
+        Estimate the VRAM and CPU overhead before starting the training loop.
+        Useful for production planning and avoiding OOM.
+        """
+        torch = _get_torch()
+        with torch.no_grad():
+            num_params = sum(p.numel() for p in self._params.values())
+        
+            # 1. State Memory: Each tracked parameter needs a 'prev_weight' buffer (float32)
+            state_mem_mb = (num_params * 4) / (1024 * 1024)
+            
+            # 2. Gradient Buffer: Temporary storage for gradients before processing
+            grad_buf_mb = (num_params * 4) / (1024 * 1024)
+            
+            return {
+                "estimated_vram_mb": state_mem_mb + grad_buf_mb,
+                "estimated_cpu_mem_mb": state_mem_mb,
+                "tracked_parameters": len(self._param_names),
+                "total_tracked_elements": num_params,
+                "recommendation": "High" if state_mem_mb > 500 else "Low"
+            }
 
     def step(self, loss: Optional[float] = None, metrics: Optional[Dict[str, float]] = None):
         """
@@ -157,8 +197,21 @@ class FlowTracker:
             loss: Current loss value (optional but recommended).
             metrics: Dict of additional metrics to track (e.g. {'val_loss': 0.5}).
         """
+        t0 = time.time()
         torch = _get_torch()
         self._step_count += 1
+        
+        # Update memory statistics
+        self.memory.update()
+        
+        # Distributed aggregation
+        if torch.distributed.is_initialized():
+            # Sync loss
+            if loss is not None:
+                loss_t = torch.tensor([loss], device=torch.cuda.current_device() if torch.cuda.is_available() else 'cpu')
+                torch.distributed.all_reduce(loss_t, op=torch.distributed.ReduceOp.SUM)
+                loss = loss_t.item() / torch.distributed.get_world_size()
+
         record = StepRecord(
             step=self._step_count,
             loss=loss,
@@ -202,25 +255,46 @@ class FlowTracker:
 
                     self._prev_weights[name] = w_np.copy()
 
-            # Gradient statistics
+            # Gradient statistics (Non-blocking processing)
             if self.track_gradients and name in self._grad_stats:
-                gs = self._grad_stats[name]
-                snap.grad_norm = gs["norm"]
-                snap.grad_mean = gs["mean"]
-                snap.grad_std = gs["std"]
-                snap.grad_min = gs["min"]
-                snap.grad_max = gs["max"]
+                g = self._grad_stats[name]
+                with torch.no_grad():
+                    # Move to CPU only for the summary statistics computation
+                    g_cpu = g.float().cpu()
+                    snap.grad_norm = g_cpu.norm().item()
+                    snap.grad_mean = g_cpu.mean().item()
+                    snap.grad_std = g_cpu.std().item() if g_cpu.numel() > 1 else 0.0
+                    snap.grad_min = g_cpu.min().item()
+                    snap.grad_max = g_cpu.max().item()
+                
+                # Distributed Sync for Gradient Norms
+                if torch.distributed.is_initialized():
+                    gn_t = torch.tensor([snap.grad_norm**2], device=g.device)
+                    torch.distributed.all_reduce(gn_t, op=torch.distributed.ReduceOp.SUM)
+                    snap.grad_norm = (gn_t.item() ** 0.5) / (torch.distributed.get_world_size() ** 0.5)
+                
+                # Critical: Remove from dict to free GPU/Memory
+                del self._grad_stats[name]
 
             record.layers[name] = snap
 
         self.store.add_step(record)
+        
+        # Record overhead for this step
+        self._overhead_ms += (time.time() - t0) * 1000
+        self._total_steps_tracked += 1
 
     def report(self, top_k: int = 5) -> None:
         """
         Generate and print a text diagnostic report of the training so far.
         """
         from gradtracer.diagnostics import generate_dl_report
-        rep = generate_dl_report(self.store, top_k=top_k)
+        rep = generate_dl_report(
+            self.store, 
+            memory_summary=self.memory.get_summary(), 
+            overhead_ms=self._overhead_ms,
+            top_k=top_k
+        )
         print(rep)
 
     @property

@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gradtracer"
-version = "0.8.1"
-description = "Flow-based Diagnostics for Embedding Systems & Compression"
+version = "0.9.0"
+description = "Interventional Training Dynamics Diagnostics for Embedding Systems & Compression"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 authors = [
     {name = "GradTracer Contributors"}
 ]
-keywords = ["machine-learning", "deep-learning", "feature-engineering", "pytorch", "xgboost", "lightgbm", "catboost", "scikit-learn", "recsys", "model-diagnostics", "training-dynamics"]
+keywords = ["pytorch", "recsys", "model-compression", "training-dynamics", "xai", "gbdt", "diagnostics"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",

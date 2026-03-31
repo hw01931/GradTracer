@@ -90,6 +90,8 @@ class CompressionSnapshot:
 
     # Performance
     eval_metrics: Dict[str, float] = field(default_factory=dict)
+    inference_latency_ms: float = 0.0
+    peak_vram_mb: float = 0.0
 
     # Layer detail
     layer_stats: Dict[str, LayerCompressionStats] = field(default_factory=dict)
@@ -158,7 +160,7 @@ class CompressionTracker:
         if not self.tracker:
             raise ValueError("FlowTracker is required for joint compression analysis.")
             
-        print(f"🛠️ Starting JOINT COMPRESSION (Goal: {target_sparsity*100}% Pruning + Mixed-Precision)")
+        print(f"Starting JOINT COMPRESSION (Goal: {target_sparsity*100}% Pruning + Mixed-Precision)")
         
         # Step A: Filtered Pruning (Targeting redundant weight parameters)
         advisor_p = PruningAdvisor(self.tracker)
@@ -231,6 +233,42 @@ class CompressionTracker:
                         )
         return stats
 
+    def _measure_latency(self, model, input_shape: Optional[tuple] = None, device='cpu', warm_up=10, iterations=50) -> float:
+        """Measure inference latency in milliseconds."""
+        torch = _get_torch()
+        import torch.nn as nn
+        model.to(device)
+        model.eval()
+
+        if input_shape is None:
+            # Try to infer input shape from first linear/conv layer
+            for m in model.modules():
+                if isinstance(m, nn.Linear):
+                    input_shape = (1, m.in_features)
+                    break
+                elif isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d)):
+                    # Generic guess for conv: (1, in_channels, 32, 32)
+                    input_shape = (1, m.in_channels, 32, 32)
+                    break
+            if input_shape is None:
+                input_shape = (1, 512) # Fallback
+
+        x = torch.randn(*input_shape).to(device)
+        
+        # Warm-up
+        with torch.no_grad():
+            for _ in range(warm_up):
+                _ = model(x)
+        
+        # Timing
+        start = time.time()
+        with torch.no_grad():
+            for _ in range(iterations):
+                _ = model(x)
+        end = time.time()
+        
+        return (end - start) * 1000 / iterations
+
     def _evaluate(self, model) -> float:
         """Evaluate model using eval_fn."""
         if self.eval_fn is None:
@@ -267,6 +305,12 @@ class CompressionTracker:
         if eval_metrics is None and self.eval_fn is not None:
             score = self._evaluate(self.model)
             eval_metrics = {"score": score}
+        
+        # New Latency/VRAM tracking
+        latency = self._measure_latency(self.model)
+        
+        torch = _get_torch()
+        peak_vram = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
 
         snap = CompressionSnapshot(
             name=name,
@@ -277,6 +321,8 @@ class CompressionTracker:
             sparsity=1.0 - (nonzero / max(total, 1)),
             bits=config.get("bits", 32),
             eval_metrics=eval_metrics or {},
+            inference_latency_ms=latency,
+            peak_vram_mb=peak_vram,
             layer_stats=layer_stats,
             config=config,
         )
@@ -611,21 +657,22 @@ class CompressionTracker:
         lines.append("📋 Snapshot Comparison")
         lines.append("─" * 60)
 
-        header = f"  {'Version':<20s} {'Params':>10s} {'Sparsity':>10s} {'Size(MB)':>10s} {'Score':>10s} {'vs Orig':>10s}"
+        header = f"  {'Version':<20s} {'Params':>10s} {'Sparsity':>9s} {'Size(MB)':>9s} {'Latency':>9s} {'Score':>10s} {'vs Orig':>8s}"
         lines.append(header)
-        lines.append("  " + "─" * 70)
+        lines.append("  " + "─" * 85)
 
         orig_score = self.snapshots[0].eval_metrics.get("score", 1.0) if self.snapshots else 1.0
 
         for snap in self.snapshots:
             score = snap.eval_metrics.get("score", 0)
             retained = score / orig_score * 100 if orig_score > 0 else 100
-            emoji = "✅" if retained >= 95 else "🟡" if retained >= 90 else "❌"
+            status = "OK" if retained >= 95 else "WARN" if retained >= 90 else "FAIL"
 
             params_str = f"{snap.nonzero_params / 1000:.1f}K" if snap.nonzero_params < 1e6 else f"{snap.nonzero_params / 1e6:.2f}M"
+            lat_str = f"{snap.inference_latency_ms:.2f}ms"
             lines.append(
-                f"  {snap.name:<20s} {params_str:>10s} {snap.sparsity*100:>9.1f}% "
-                f"{snap.model_size_mb:>9.2f} {score:>10.4f} {retained:>8.1f}% {emoji}"
+                f"  {snap.name:<20s} {params_str:>10s} {snap.sparsity*100:>8.1f}% "
+                f"{snap.model_size_mb:>9.2f} {lat_str:>9s} {score:>10.4f} {retained:>7.1f}% {status}"
             )
         lines.append("")
 
@@ -661,9 +708,8 @@ class CompressionTracker:
             sorted_layers = sorted(layer_max_drops.items(), key=lambda x: -x[1])
             for name, drop in sorted_layers:
                 pct = drop / baseline * 100 if baseline > 0 else 0
-                emoji = "🔴" if pct > 5 else "🟡" if pct > 2 else "🟢"
                 label = "SENSITIVE!" if pct > 5 else "moderate" if pct > 2 else "safe to prune"
-                lines.append(f"  {emoji} {name:<30s} 50% pruning → {pct:>5.1f}% drop ({label})")
+                lines.append(f"  {name:<30s} 50% pruning → {pct:>5.1f}% drop ({label})")
 
             # Non-uniform recommendation
             rec = self.recommend_nonuniform()

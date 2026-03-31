@@ -104,6 +104,76 @@ class DLPlotAPI:
     def __init__(self, store):
         self.store = store
 
+    def velocity_heatmap(self, save_path: Optional[str] = None):
+        """Plots a heatmap of layer velocity over time."""
+        sns.set_theme(style="white")
+        layers = self.store.layer_names
+        if not layers: return
+        
+        data = []
+        for name in layers:
+            data.append(self.store.get_layer_series(name, "velocity"))
+            
+        plt.figure(figsize=(12, 8))
+        sns.heatmap(data, yticklabels=layers, cmap="YlGnBu")
+        plt.title("Layer Velocity Heatmap")
+        if save_path: plt.savefig(save_path); plt.close()
+        else: plt.show()
+
+    def weight_distribution(self, layer_name: str, save_path: Optional[str] = None):
+        """Plots the weight distribution of a specific layer."""
+        series = self.store.get_layer_series(layer_name, "weight_mean")
+        plt.figure(figsize=(10, 6))
+        sns.histplot(series, kde=True)
+        plt.title(f"Weight Distribution: {layer_name}")
+        if save_path: plt.savefig(save_path); plt.close()
+        else: plt.show()
+
+    def gradient_flow(self, save_path: Optional[str] = None):
+        """Plots the gradient norm flow across all layers."""
+        plt.figure(figsize=(12, 6))
+        for name in self.store.layer_names:
+            series = self.store.get_layer_series(name, "grad_norm")
+            plt.plot(series, label=name, alpha=0.6)
+        plt.title("Gradient Norm Flow")
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        if save_path: plt.savefig(save_path); plt.close()
+        else: plt.show()
+
+    def gradient_snr(self, save_path: Optional[str] = None):
+        """Plots the Gradient SNR for all layers."""
+        from gradtracer.analyzers.health import gradient_snr_per_layer
+        snr_dict = gradient_snr_per_layer(self.store)
+        plt.figure(figsize=(12, 6))
+        for name, series in snr_dict.items():
+            plt.plot(series, label=name)
+        plt.title("Gradient Signal-to-Noise Ratio (SNR)")
+        plt.yscale('log')
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.tight_layout()
+        if save_path: plt.savefig(save_path); plt.close()
+        else: plt.show()
+
+    def health_dashboard(self, save_path: Optional[str] = None):
+        """Plots a summary of layer health scores."""
+        from gradtracer.analyzers.health import layer_health_score
+        scores = layer_health_score(self.store)
+        names = list(scores.keys())
+        vals = list(scores.values())
+        
+        plt.figure(figsize=(12, 6))
+        sns.barplot(x=vals, y=names, palette="RdYlGn")
+        plt.axvline(x=70, color='green', linestyle='--')
+        plt.axvline(x=40, color='red', linestyle='--')
+        plt.title("Layer Health Dashboard")
+        if save_path: plt.savefig(save_path); plt.close()
+        else: plt.show()
+
+    def full_report(self, save_path: Optional[str] = None):
+        """Generates all visualizations into one dashboard."""
+        self.mechanistic(save_path=save_path)
+
     def mechanistic(self, save_path: Optional[str] = None):
         """
         Generates a beautiful 1x3 XAI Dashboard displaying:

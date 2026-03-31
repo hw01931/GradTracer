@@ -28,7 +28,7 @@ Usage (AI Agent Mode):
     print(json)  # AI reads this and auto-applies fixes
 """
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 from gradtracer.tracker import FlowTracker
 from gradtracer.analyzers.boosting import BoostingTracker

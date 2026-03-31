@@ -14,7 +14,12 @@ from gradtracer.snapshot import BoostingStore, SnapshotStore
 #  DL Diagnostics
 # ──────────────────────────────────────────────────────────────────────
 
-def generate_dl_report(store: SnapshotStore, top_k: int = 5) -> str:
+def generate_dl_report(
+    store: SnapshotStore, 
+    memory_summary: Optional[dict] = None, 
+    overhead_ms: float = 0.0,
+    top_k: int = 5
+) -> str:
     """
     Generate a comprehensive text diagnostic report for DL training.
 
@@ -41,6 +46,32 @@ def generate_dl_report(store: SnapshotStore, top_k: int = 5) -> str:
         lines.append(f"   Min loss: {min(valid_losses):.6f} at step "
                       f"{valid_losses.index(min(valid_losses)) + 1}")
     lines.append("")
+
+    # Resource & ROI Section
+    if memory_summary:
+        lines.append("─" * 60)
+        lines.append("🔋 Resource Consumption & ROI")
+        lines.append("─" * 60)
+        lines.append(f"  Peak CPU: {memory_summary.get('peak_cpu_mb', 0):.1f} MB "
+                      f"(Δ: {memory_summary.get('delta_cpu_mb', 0):+.1f} MB)")
+        
+        gpu_keys = [k for k in memory_summary.keys() if k.startswith("peak_gpu")]
+        for k in gpu_keys:
+            lines.append(f"  {k.replace('_mb', '').upper().replace('_', ' ')}: {memory_summary[k]:.1f} MB")
+        
+        # Simple ROI Score (Conceptual)
+        # Higher is better. Factors in loss improvement vs memory footprint.
+        if valid_losses and valid_losses[0] > 0:
+            imp = (valid_losses[0] - valid_losses[-1]) / valid_losses[0]
+            mem_factor = max(1.0, memory_summary.get('delta_cpu_mb', 0) / 1000.0) # Penalty per GB
+            roi_score = (imp * 1000) / mem_factor
+            lines.append(f"  🎯 ROI Score: {roi_score:.2f} (Efficiency rating)")
+        
+        if overhead_ms > 0:
+            avg_overhead = overhead_ms / max(1, store.num_steps)
+            lines.append(f"  ⏱️  GradTracer Overhead: {avg_overhead:.2f} ms/tracked_step")
+            
+        lines.append("")
 
     # Health scores
     lines.append("─" * 60)
